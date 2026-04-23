@@ -29,3 +29,9 @@ htmlcov/
 
 # Per-host opt-in sentinel for scripts/auto-update.sh
 .auto-update-enabled
+
+# Site (managed separately, not part of the API repo)
+librewxr-site/
+
+# OpenCode example (not ready for release)
+examples/opencode-example.html

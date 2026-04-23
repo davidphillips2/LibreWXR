@@ -92,6 +92,18 @@
     <span class="title">Weather Radar (LibreWXR)</span>
     <span id="timestamp">Loading...</span>
     <div class="buttons">
+        <select id="colorScheme" onchange="changeColorScheme()">
+            <option value="7" selected>Rainbow</option>
+            <option value="4">The Weather Channel</option>
+            <option value="5">Meteored</option>
+            <option value="6">NEXRAD Level III</option>
+            <option value="2">Universal Blue</option>
+            <option value="8">Dark Sky</option>
+            <option value="0">Black &amp; White</option>
+            <option value="1">Original</option>
+            <option value="3">TITAN</option>
+            <option value="255">Raw Grayscale</option>
+        </select>
         <select id="arrowsToggle" onchange="toggleArrows()">
             <option value="">Arrows: Off</option>
             <option value="light">Arrows: Light</option>
@@ -126,6 +138,7 @@ var animationTimer = false;
 var currentLayer = null;
 var isLoading = false;
 var layerCache = {};
+var currentColorScheme = 7;
 var arrowsMode = '';
 var hideAnimArrows = false;
 
@@ -155,7 +168,7 @@ function formatTime(timestamp) {
 function createRadarLayer(frame) {
     var useArrows = arrowsMode && !(hideAnimArrows && animationTimer);
     var arrowsParam = useArrows ? '?arrows=' + arrowsMode : '';
-    return new L.TileLayer(apiData.host + frame.path + '/' + TILE_SIZE + '/{z}/{x}/{y}/7/1_1.png' + arrowsParam, {
+    return new L.TileLayer(apiData.host + frame.path + '/' + TILE_SIZE + '/{z}/{x}/{y}/' + currentColorScheme + '/1_1.png' + arrowsParam, {
         tileSize: 256,
         opacity: 0.001,
         maxZoom: 12
@@ -206,6 +219,13 @@ function clearAllLayers() {
         delete layerCache[pos];
     }
     currentLayer = null;
+}
+
+function changeColorScheme() {
+    currentColorScheme = parseInt(document.getElementById('colorScheme').value);
+    stop();
+    clearAllLayers();
+    showFrame(animationPosition);
 }
 
 function toggleArrows() {
