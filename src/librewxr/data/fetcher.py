@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 import numpy as np
 
 from librewxr.config import settings
+from librewxr.memory import release_memory
 from librewxr.data.cloud_grid import CloudGrid
 from librewxr.data.ecmwf_grid import ECMWFGrid
 from librewxr.data.regions import REGIONS, RegionDef
@@ -108,6 +109,7 @@ class RadarFetcher:
             await self._run_nowcast()
         except Exception:
             logger.exception("Error in initial backfill")
+        release_memory()
 
         interval = settings.fetch_interval
         while True:
@@ -119,6 +121,7 @@ class RadarFetcher:
                 await self._run_nowcast()
             except Exception:
                 logger.exception("Error in fetch loop")
+            release_memory()
 
     async def _fetch_initial(self) -> None:
         """Quick startup: fetch auxiliary grids and latest radar frame only."""
@@ -166,6 +169,7 @@ class RadarFetcher:
             await self._cloud_grid.fetch()
         except Exception:
             logger.warning("Cloud cover fetch failed, satellite layer may be stale")
+        release_memory()
 
     async def _fetch_all_frames(self) -> None:
         """Fetch frames for all enabled regions to fill the store.

@@ -6,6 +6,8 @@ Periodically checks process RSS against the container/system memory
 limit and proactively evicts caches before the OOM killer intervenes.
 """
 import asyncio
+import ctypes
+import gc
 import logging
 from pathlib import Path
 
@@ -14,6 +16,23 @@ import psutil
 from librewxr.tiles.cache import TileCache
 
 logger = logging.getLogger(__name__)
+
+
+def release_memory() -> None:
+    """Force Python garbage collection and return freed pages to the OS.
+
+    Python's garbage collector doesn't run eagerly for non-cyclic objects,
+    and glibc's malloc never returns freed heap pages to the OS on its own.
+    Calling gc.collect() + malloc_trim(0) after heavy operations (ECMWF
+    regridding, nowcast optical flow) reclaims hundreds of MB that would
+    otherwise show up as "other" in the memory breakdown.
+    """
+    gc.collect()
+    try:
+        libc = ctypes.CDLL("libc.so.6")
+        libc.malloc_trim(0)
+    except (OSError, AttributeError):
+        pass  # Non-glibc platform (musl, macOS) — gc.collect() is enough
 
 # Eviction thresholds (fraction of memory limit)
 _WARN_THRESHOLD = 0.80
@@ -106,9 +125,11 @@ class MemoryMonitor:
             )
             self._tile_cache.clear()
             self._clear_coord_caches()
+            release_memory()
 
         elif usage >= _EVICT_TILES_THRESHOLD:
             freed = self._tile_cache.evict_half()
+            release_memory()
             logger.warning(
                 "Memory pressure: %d MB / %d MB (%.0f%%) — evicted %.1f MB of tiles",
                 rss // (1024 * 1024), self._limit_mb, usage * 100,
