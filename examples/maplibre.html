@@ -1144,8 +1144,7 @@ map.on('movestart', function() {
 });
 
 map.on('moveend', function() {
-    // Restart preloading after pan/zoom ends
-    setTimeout(startPreloading, 200);
+    // No-op — preloading starts when the user clicks play
 });
 
 // === AUTO-REFRESH ===

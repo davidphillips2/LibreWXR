@@ -1073,11 +1073,8 @@ map.on('movestart', function() {
 });
 
 map.on('moveend', function() {
-    // Restart preloading after pan/zoom ends
-    setTimeout(startPreloading, 200);
     // Re-add satellite background if needed
     if (activeLayer === 'both' && satelliteBgLayer) {
-        // The layer handles its own tiles on moveend, just make sure it is visible
         satelliteBgLayer.setOpacity(SATELLITE_OPACITY);
     }
 });
