@@ -423,6 +423,7 @@ var activeTheme = 'dark';
 var satelliteBgActive = false;
 var satelliteBgTimestamp = null;
 var preloadAbort = false;
+var preloadCallback = null;
 var preloadedCount = 0;
 var autoRefreshTimer = null;
 var isDragging = false;
@@ -725,6 +726,8 @@ function stopAnimation() {
         clearTimeout(animationTimer);
         animationTimer = null;
     }
+    preloadAbort = true;
+    preloadCallback = null;
     if (isPlaying) {
         isPlaying = false;
         document.getElementById('playIcon').style.display = '';
@@ -746,7 +749,14 @@ function playStop() {
         var resetPos = nowcastStartIndex >= 0 ? nowcastStartIndex - 1 : mapFrames.length - 1;
         showFrame(resetPos);
     } else {
-        startAnimation();
+        // Preload all frames, then start animation
+        startPreloading(function() {
+            if (!isPlaying) startAnimation();
+        });
+        // Show play intent immediately
+        isPlaying = true;
+        document.getElementById('playIcon').style.display = 'none';
+        document.getElementById('pauseIcon').style.display = '';
     }
 }
 
@@ -965,8 +975,9 @@ function hidePreloadIndicator() {
     document.getElementById('preloadIndicator').classList.remove('visible');
 }
 
-function startPreloading() {
+function startPreloading(onComplete) {
     preloadAbort = true; // Cancel any in-progress preload
+    preloadCallback = onComplete || null;
     setTimeout(function() {
         preloadAbort = false;
         doPreload();
@@ -983,6 +994,7 @@ function doPreload() {
 
     if (toLoad.length === 0) {
         hidePreloadIndicator();
+        if (preloadCallback) { preloadCallback(); preloadCallback = null; }
         return;
     }
 
@@ -993,6 +1005,10 @@ function doPreload() {
     function loadNext(idx) {
         if (preloadAbort || idx >= toLoad.length) {
             hidePreloadIndicator();
+            if (!preloadAbort && idx >= toLoad.length && preloadCallback) {
+                preloadCallback();
+                preloadCallback = null;
+            }
             return;
         }
 
@@ -1085,9 +1101,6 @@ function reinitialize() {
     }
 
     showFrame(startPos);
-
-    // Start preloading after initial frame
-    setTimeout(startPreloading, 300);
 }
 
 function loadApiData() {
