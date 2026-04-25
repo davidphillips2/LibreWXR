@@ -689,7 +689,7 @@ function playStop() {
     } else {
         // Preload all frames, then start animation
         startPreloading(function() {
-            if (!isPlaying) startAnimation();
+            startAnimation();
         });
         // Show play intent immediately
         isPlaying = true;
@@ -865,6 +865,7 @@ function showFrame(position) {
     }
 
     isLoading = true;
+    showLoadingIndicator();
 
     var newLayer;
     var targetOpacity;
@@ -885,6 +886,7 @@ function showFrame(position) {
         layerCache[position] = newLayer;
         currentLayer = newLayer;
         isLoading = false;
+        hideLoadingIndicator();
 
         if (isPlaying) {
             animationTimer = setTimeout(function() { showFrame(position + 1); }, getFrameDelay(position));
@@ -892,6 +894,22 @@ function showFrame(position) {
     });
 
     newLayer.addTo(map);
+}
+
+// === LOADING INDICATOR (single frame) ===
+function showLoadingIndicator() {
+    var el = document.getElementById('preloadIndicator');
+    var text = document.getElementById('preloadText');
+    var fill = document.getElementById('preloadFill');
+    text.textContent = 'Loading frame...';
+    fill.style.width = '0%';
+    el.classList.add('visible');
+}
+
+function hideLoadingIndicator() {
+    // Don't hide if a bulk preload is in progress (it manages its own indicator)
+    if (!preloadAbort && preloadCallback) return;
+    document.getElementById('preloadIndicator').classList.remove('visible');
 }
 
 // === PRELOADING ===
@@ -1095,8 +1113,12 @@ function startAutoRefresh() {
                 var newLatest = newPast.length > 0 ? newPast[newPast.length - 1].time : 0;
 
                 if (newLatest !== oldLatest) {
+                    var wasPlaying = isPlaying;
                     apiData = newData;
                     reinitialize();
+                    if (wasPlaying) {
+                        playStop(); // Resume: preload then animate
+                    }
                 }
             }
         };
