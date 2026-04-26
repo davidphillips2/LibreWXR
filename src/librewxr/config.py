@@ -46,15 +46,19 @@ class Settings(BaseSettings):
         """Return effective ECMWF timestep count.
 
         If ecmwf_max_timesteps > 0, use it as-is (user override).
-        Otherwise auto-derive from max_frames, plus extra future hours
-        when nowcast is enabled to cover the forecast window.
+        Otherwise auto-derive from max_frames + nowcast_frames, with two
+        extra hourly buckets so the window still covers both ends of the
+        radar/nowcast span when ``now`` falls between hourly IFS marks
+        (worst case can drift the window up to ~1h on each side).
         """
         if self.ecmwf_max_timesteps > 0:
             return self.ecmwf_max_timesteps
-        base = math.ceil(self.max_frames / 6) + 1
-        if self.nowcast_enabled:
-            base += math.ceil(self.nowcast_frames * self.fetch_interval / 3600)
-        return base
+        past_hours = math.ceil(self.max_frames * self.fetch_interval / 3600)
+        future_hours = (
+            math.ceil(self.nowcast_frames * self.fetch_interval / 3600)
+            if self.nowcast_enabled else 0
+        )
+        return past_hours + future_hours + 2
 
     def get_enabled_regions(self) -> list[str]:
         """Resolve the region spec into individual region names."""
