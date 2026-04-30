@@ -87,7 +87,7 @@ If you restrict this, make sure your web app's origin is included or tile reques
 
 Seconds between radar data fetches. Frame timestamps are always aligned to clock boundaries (e.g., :00, :10, :20) regardless of when the server starts.
 
-The default of 600 seconds (10 minutes) matches Rain Viewer's cadence. IEM publishes US composites every 5 minutes, so 300 is possible if you want higher temporal resolution at the cost of double the frames in memory.
+The default of 600 seconds (10 minutes) matches Rain Viewer's cadence. IEM publishes US composites every 5 minutes; MRMS publishes every 2 minutes. Setting the interval below 300 seconds is not recommended as most sources don't update faster than that.
 
 | | |
 |---|---|
@@ -111,9 +111,50 @@ More frames = longer animation history = more RAM usage.
 | **Default** | `12` |
 | **Type** | integer |
 
----
+### `LIBREWXR_NA_SOURCE`
 
-## Regions
+Data source for North American radar composites (USCOMP, AKCOMP, HICOMP, PRCOMP, GUCOMP, and CACOMP). Three modes:
+
+- **`mrms_fallback`** (default) — NCEP MRMS quality-controlled mosaics as the primary source, with IEM NEXRAD fallback for US regions and MSC blending for Canadian gaps. Best coverage: MRMS includes Canadian radar ingest and quality control. IEM is only fetched when MRMS fails for a specific frame.
+- **`mrms`** — NCEP MRMS only, no fallback or blending. Pure MRMS where available; gaps show as empty (ECMWF IFS global fallback still fills in outside radar coverage). Least bandwidth.
+- **`iem`** — Legacy mode. IEM NEXRAD N0Q for US regions, MSC GeoMet standalone for Canada. NEXRAD-only without Canadian radar ingest. Simplest and most battle-tested, but fewer radars and no QC.
+
+| | |
+|---|---|
+| **Default** | `mrms_fallback` |
+| **Type** | string |
+| **Values** | `mrms_fallback`, `mrms`, `iem` |
+
+**Note:** This setting does not affect the OPERA (Europe) source, which always uses EUMETNET OPERA via MeteoGate S3.
+
+### `LIBREWXR_MRMS_BASE_URL`
+
+Base URL for NCEP MRMS data products. Each region (CONUS, Alaska, Hawaii, Caribbean, Guam) has its own subdirectory under this path.
+
+| | |
+|---|---|
+| **Default** | `https://mrms.ncep.noaa.gov/2D` |
+| **Type** | string |
+
+Only change this if you're mirroring MRMS data to a custom endpoint.
+
+### `LIBREWXR_IEM_BASE_URL`
+
+Base URL for the Iowa Environmental Mesonet NEXRAD composites (US regions). Only used when `LIBREWXR_NA_SOURCE` is `iem` or `mrms_fallback`.
+
+| | |
+|---|---|
+| **Default** | `https://mesonet.agron.iastate.edu` |
+| **Type** | string |
+
+### `LIBREWXR_MSC_CANADA_BASE_URL`
+
+Base URL for the Environment and Climate Change Canada MSC GeoMet WMS service (Canadian radar). Only used when `LIBREWXR_NA_SOURCE` is `iem` or `mrms_fallback`.
+
+| | |
+|---|---|
+| **Default** | `https://geo.weather.gc.ca` |
+| **Type** | string |
 
 ### `LIBREWXR_ENABLED_REGIONS`
 
@@ -138,12 +179,12 @@ Which radar regions to fetch and serve. Accepts group aliases, individual region
 
 | Region | Area | Source | Grid Size | Resolution | RAM / Frame |
 |--------|------|--------|-----------|------------|-------------|
-| `USCOMP` | Continental US | IEM | 12200 x 5400 | 0.005° (~500m) | ~63 MB |
-| `AKCOMP` | Alaska | IEM | 4000 x 1550 | 0.01° (~1km) | ~6 MB |
-| `HICOMP` | Hawaii | IEM | 2000 x 1800 | 0.005° (~500m) | ~3.4 MB |
-| `PRCOMP` | Puerto Rico | IEM | 1000 x 1000 | 0.01° (~1km) | ~1 MB |
-| `GUCOMP` | Guam | IEM | 1000 x 1000 | 0.0085° (~850m) | ~1 MB |
-| `CACOMP` | Canada | ECCC (MSC GeoMet WMS) | 3560 x 1720 | 0.025° (~2.5km) | ~6 MB |
+| `USCOMP` | Continental US | NCEP MRMS (IEM fallback) | 12200 x 5400 | 0.005° (~500m) | ~63 MB |
+| `AKCOMP` | Alaska | NCEP MRMS (IEM fallback) | 4000 x 1550 | 0.01° (~1km) | ~6 MB |
+| `HICOMP` | Hawaii | NCEP MRMS (IEM fallback) | 2000 x 1800 | 0.005° (~500m) | ~3.4 MB |
+| `PRCOMP` | Puerto Rico | NCEP MRMS (IEM fallback) | 1000 x 1000 | 0.01° (~1km) | ~1 MB |
+| `GUCOMP` | Guam | NCEP MRMS (IEM fallback) | 1000 x 1000 | 0.0085° (~850m) | ~1 MB |
+| `CACOMP` | Canada | MSC GeoMet (MRMS blending) | 3560 x 1720 | 0.025° (~2.5km) | ~6 MB |
 | `OPERA` | Europe | EUMETNET OPERA (MeteoGate S3) | 3800 x 4400 | 1km (LAEA) | ~16 MB |
 
 **Examples:**
@@ -156,24 +197,6 @@ LIBREWXR_ENABLED_REGIONS=CONUS,EUROPE     # Continental US + Europe
 LIBREWXR_ENABLED_REGIONS=US,CANADA        # US + Canada
 LIBREWXR_ENABLED_REGIONS=ALL              # Everything
 ```
-
-### `LIBREWXR_IEM_BASE_URL`
-
-Base URL for the Iowa Environmental Mesonet NEXRAD composites (US regions).
-
-| | |
-|---|---|
-| **Default** | `https://mesonet.agron.iastate.edu` |
-| **Type** | string |
-
-### `LIBREWXR_MSC_CANADA_BASE_URL`
-
-Base URL for the Environment and Climate Change Canada MSC GeoMet WMS service (Canadian radar).
-
-| | |
-|---|---|
-| **Default** | `https://geo.weather.gc.ca` |
-| **Type** | string |
 
 ### `LIBREWXR_OPERA_BASE_URL`
 

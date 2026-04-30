@@ -15,7 +15,7 @@ Beyond this though, is the goal of creating a far more customizable API backend 
 - **Tile sizes** — 256px and 512px
 - **Image formats** — PNG and WebP (with configurable lossy/lossless quality)
 - **Smoothing** — zoom-adaptive Gaussian blur with seamless tile boundaries
-- **Multi-region coverage** — US (CONUS, Alaska, Hawaii, Puerto Rico, Guam), Europe (OPERA pan-European composite, ~155 radars across 24 countries), and Canada
+- **Multi-region coverage** — US (CONUS, Alaska, Hawaii, Puerto Rico, Guam) via NOAA MRMS quality-controlled mosaics with IEM fallback, Europe (OPERA pan-European composite, ~155 radars across 24 countries), and Canada (MSC GeoMet with MRMS blending)
 - **ECMWF IFS global fallback** — ECMWF IFS 9km precipitation data fills in worldwide coverage where no radar composite exists (~3x higher resolution than previous GFS fallback), with multi-timestep animation that auto-scales to match radar history length
 - **Optical flow interpolation** — hourly ECMWF IFS frames are interpolated to 10-minute steps using dense motion vectors, so global fallback areas animate smoothly like real radar data instead of jumping hour-to-hour (configurable, enabled by default)
 - **Precipitation nowcasting (experimental)** — 60-minute short-range forecast by extrapolating recent radar forward using optical flow, with configurable blend mode: pure radar extrapolation (default, closest to Rain Viewer), smooth radar-to-IFS blending, or pure IFS forecast. Beyond 60 minutes, always uses IFS. Quality varies by weather pattern — works best for steady, organized precipitation; less reliable for fast-developing convection
@@ -242,12 +242,12 @@ All settings are configured via environment variables (or a `.env` file). Copy `
 
 | Code | Region | Source | Resolution | RAM per frame |
 |---|---|---|---|---|
-| `USCOMP` | Continental US | IEM | 0.005° (~500m) | ~63 MB |
-| `AKCOMP` | Alaska | IEM | 0.01° (~1km) | ~6 MB |
-| `HICOMP` | Hawaii | IEM | 0.005° (~500m) | ~3.4 MB |
-| `PRCOMP` | Puerto Rico | IEM | 0.01° (~1km) | ~1 MB |
-| `GUCOMP` | Guam | IEM | 0.0085° (~850m) | ~1 MB |
-| `CACOMP` | Canada | ECCC (MSC GeoMet) | 0.025° (~2.5km) | ~6 MB |
+| `USCOMP` | Continental US | NCEP MRMS (IEM fallback) | 0.005° (~500m) | ~63 MB |
+| `AKCOMP` | Alaska | NCEP MRMS (IEM fallback) | 0.01° (~1km) | ~6 MB |
+| `HICOMP` | Hawaii | NCEP MRMS (IEM fallback) | 0.005° (~500m) | ~3.4 MB |
+| `PRCOMP` | Puerto Rico | NCEP MRMS (IEM fallback) | 0.01° (~1km) | ~1 MB |
+| `GUCOMP` | Guam | NCEP MRMS (IEM fallback) | 0.0085° (~850m) | ~1 MB |
+| `CACOMP` | Canada | MSC GeoMet (MRMS blending) | 0.025° (~2.5km) | ~6 MB |
 | `OPERA` | Europe (24 countries) | EUMETNET OPERA | 1km | ~16 MB |
 
 Group aliases: `CONUS` (continental US only), `US` (all US regions), `CANADA` (Canada), `EUROPE` (OPERA pan-European composite), `ALL` (everything).
@@ -292,9 +292,10 @@ Tiles are served with `Cache-Control: public, max-age=300`, so any caching rever
 ## Architecture
 
 ```
-[IEM NEXRAD Fetcher]      --> [Frame Store (memmap)] --> [FastAPI + Tile Renderer]
-[MSC Canada WMS Fetcher]  -->  (N frames, multi-region)    (LRU cache + tile warmer)
-[OPERA S3 Fetcher]        -->    (smart skip: only new frames fetched)
+[NCEP MRMS Fetcher]        --> [Frame Store (memmap)] --> [FastAPI + Tile Renderer]
+[IEM NEXRAD Fetcher]       -->  (N frames, multi-region)    (LRU cache + tile warmer)
+[MSC Canada WMS Fetcher]   -->    (smart skip: only new frames fetched)
+[OPERA S3 Fetcher]         -->
 
 [Open-Meteo S3] --> [ECMWF Grid (memmap)]  --> [Optical Flow Interpolation] --> [Snow/rain classification]
   (ref_time skip)   (IFS 9km)               (hourly → 10-min frames)      --> [Global fallback]
@@ -306,8 +307,8 @@ Tiles are served with `Cache-Control: public, max-age=300`, so any caching rever
   (IFS cloud cover)   (high/mid/low)   (atomic writes)   (IR-like cloud tiles)
 ```
 
-- **US data source:** IEM NEXRAD N0Q composites — 8-bit reflectivity, multiple regions (CONUS, Alaska, Hawaii, Puerto Rico, Guam)
-- **Canada data source:** ECCC MSC GeoMet WMS — pre-colored PNG precipitation composite, decoded via palette reverse-engineering back to dBZ
+- **US data source:** NCEP MRMS MultiSensor/3DReflectivity quality-controlled mosaics (default) — QC'd multi-radar composite with 2-min cadence, includes Canadian radar ingest. Falls back to IEM NEXRAD N0Q if MRMS is unavailable (configurable via `LIBREWXR_NA_SOURCE`)
+- **Canada data source:** ECCC MSC GeoMet WMS — pre-colored PNG precipitation composite, decoded via palette reverse-engineering back to dBZ. MRMS blending fills gaps in northern Canada and the Atlantic coast when `LIBREWXR_NA_SOURCE=mrms_fallback`
 - **Europe data source:** EUMETNET OPERA CIRRUS composite via MeteoGate S3 — ODIM HDF5, 3800×4400 at 1km (LAEA projection), ~155 radars across 24 countries
 - **ECMWF IFS global fallback:** ECMWF IFS at native 9km resolution via [Open-Meteo](https://open-meteo.com/) S3 — precipitation rate converted to pseudo-reflectivity via Marshall-Palmer Z-R relationship, with direct snow/rain classification from snowfall ratio. Hourly IFS frames are interpolated to 10-minute steps via OpenCV Farneback optical flow, so fallback areas animate smoothly. Skips redundant downloads when the IFS model run hasn't changed
 - **IFS-derived satellite:** Cloud cover (high/mid/low) from the same IFS data, composited into IR-like satellite tiles. Persistent disk cache with atomic writes survives restarts; backfills from previous model runs to provide continuous past coverage
@@ -341,7 +342,8 @@ Open either file in a browser — it auto-detects whether to use your local serv
 
 LibreWXR uses the following freely available data:
 
-- **[Iowa Environmental Mesonet (IEM)](https://mesonet.agron.iastate.edu/)** — NEXRAD N0Q composite radar imagery (US regions)
+- **[NCEP MRMS](https://www.ncep.noaa.gov/products/mrms/)** — MultiSensor Reanalysis/3DReflectivity quality-controlled radar composites (US + Canadian radar ingest, default source for North American regions)
+- **[Iowa Environmental Mesonet (IEM)](https://mesonet.agron.iastate.edu/)** — NEXRAD N0Q composite radar imagery (US regions, legacy fallback for MRMS)
 - **[ECCC MSC GeoMet](https://eccc-msc.github.io/open-data/msc-geomet/readme_en/)** — Canadian weather radar composite (RADAR_1KM_RRAI via WMS)
 - **[EUMETNET OPERA](https://www.eumetnet.eu/activities/observations-programme/current-activities/opera/)** — Pan-European CIRRUS radar composite via [MeteoGate](https://meteogate.eu/) S3 (~155 radars, 24 countries, ODIM HDF5)
 - **[ECMWF IFS](https://www.ecmwf.int/) via [Open-Meteo](https://open-meteo.com/)** — ECMWF IFS 9km global precipitation and snowfall data for worldwide fallback coverage and snow/rain classification (CC-BY-4.0, data provided by Open-Meteo.com)
