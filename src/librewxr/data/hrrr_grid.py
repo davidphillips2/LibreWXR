@@ -1,0 +1,804 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Joshua Kimsey
+"""NOAA HRRR sub-hourly precipitation source.
+
+Implements the NWPSource Protocol for the High-Resolution Rapid Refresh
+model.  Fetches 15-min sub-hourly composite reflectivity (REFC) from the
+public AWS Open Data S3 bucket, samples by reprojecting query lat/lon
+into HRRR's native Lambert Conformal Conic grid, and serves output frames
+at LibreWXR's 10-min cadence by linear interpolation between bracketing
+subh frames.
+
+Why this layout (vs. the IFS/ECMWFGrid layout):
+
+- HRRR is native LCC at 3 km — we project the query points into the grid
+  rather than regridding the whole grid into lat/lon.
+- ``wrfsubhf`` files give us 15-min frames natively; lerp between adjacent
+  frames is sufficient and far cheaper than the optical-flow interpolation
+  IFS needs from its hourly cadence.
+- HRRR's ``composite_reflectivity`` field is already in dBZ from the
+  model's microphysics — no Marshall-Palmer Z-R conversion required.
+
+Data attribution: NOAA HRRR, distributed via AWS Open Data
+(s3://noaa-hrrr-bdp-pds/, public domain).
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import math
+import shutil
+import tempfile
+from datetime import datetime, timezone
+from pathlib import Path
+
+import httpx
+import numpy as np
+
+from librewxr.config import settings
+
+logger = logging.getLogger(__name__)
+
+
+# ── HRRR CONUS LCC grid parameters ─────────────────────────────────────
+#
+# Source: GeoTransform metadata read from a representative HRRR GRIB2
+# file by the dynamical.org/reformatters project.  The WKT declares a
+# 2SP Lambert Conformal Conic with both standard parallels at 38.5°N,
+# which is the degenerate case equivalent to a single tangent parallel.
+# HRRR uses a 6371229m sphere (not WGS84) — this is the Earth-radius
+# convention NCEP uses for most operational models.
+
+HRRR_SPHERE_RADIUS = 6371229.0           # metres (sphere, not WGS84)
+HRRR_LAT_0 = 38.5                        # latitude of projection origin (deg)
+HRRR_LON_0 = -97.5                       # central meridian (deg)
+HRRR_STD_PARALLEL = 38.5                 # single tangent standard parallel (deg)
+HRRR_GRID_X_ORIGIN = -2699020.142521929  # x of (col=0, row=0) in projection metres
+HRRR_GRID_Y_ORIGIN = 1588193.847443335   # y of (col=0, row=0) in projection metres
+HRRR_GRID_DX = 3000.0                    # x spacing (m, increases left→right)
+HRRR_GRID_DY = 3000.0                    # y spacing (m, decreases top→bottom)
+HRRR_GRID_WIDTH = 1799                   # CONUS columns
+HRRR_GRID_HEIGHT = 1059                  # CONUS rows
+
+# Precomputed LCC constants — compiled once at import time.
+_PHI_0 = math.radians(HRRR_STD_PARALLEL)
+_N = math.sin(_PHI_0)
+_F = math.cos(_PHI_0) * math.tan(math.pi / 4 + _PHI_0 / 2) ** _N / _N
+_RHO_0 = HRRR_SPHERE_RADIUS * _F / math.tan(math.pi / 4 + _PHI_0 / 2) ** _N
+_LON_0_RAD = math.radians(HRRR_LON_0)
+
+
+def lcc_forward(
+    lat: np.ndarray, lon: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """Project geographic (lat, lon) → HRRR LCC (x, y) in metres.
+
+    Spherical Lambert Conformal Conic per Snyder (1987) §15, single
+    tangent standard parallel case (n = sin φ_0).
+    """
+    phi = np.radians(lat)
+    lam = np.radians(lon)
+
+    rho = HRRR_SPHERE_RADIUS * _F / np.tan(np.pi / 4 + phi / 2) ** _N
+    theta = _N * (lam - _LON_0_RAD)
+
+    x = rho * np.sin(theta)
+    y = _RHO_0 - rho * np.cos(theta)
+    return x, y
+
+
+def grid_indices(
+    lat: np.ndarray, lon: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """Convert (lat, lon) to fractional (row, col) on the HRRR grid.
+
+    Row 0 is the top of the grid (northernmost projected y); column 0 is
+    the leftmost (westernmost projected x).  Out-of-domain points still
+    return values, just outside [0, height) × [0, width); callers should
+    test ``domain_mask`` first.
+    """
+    x, y = lcc_forward(lat, lon)
+    col = (x - HRRR_GRID_X_ORIGIN) / HRRR_GRID_DX
+    row = (HRRR_GRID_Y_ORIGIN - y) / HRRR_GRID_DY
+    return row, col
+
+
+def domain_mask(lat: np.ndarray, lon: np.ndarray) -> np.ndarray:
+    """Return ``True`` where (lat, lon) falls inside the HRRR CONUS grid.
+
+    Uses the inclusive-of-edges convention for cells but excludes the
+    last row/column to leave room for bilinear sampling without boundary
+    fixup.  At HRRR's 3 km resolution this drops ~3 km of fringe; not
+    visible at any tile zoom.
+    """
+    row, col = grid_indices(lat, lon)
+    return (
+        (row >= 0)
+        & (row < HRRR_GRID_HEIGHT - 1)
+        & (col >= 0)
+        & (col < HRRR_GRID_WIDTH - 1)
+    )
+
+
+# ── GRIB2 byte-range fetch ─────────────────────────────────────────────
+#
+# HRRR is published as multi-message GRIB2 files alongside an ``.idx``
+# sidecar that lists each message's variable, level, forecast step, and
+# byte offset.  Range requests against the bucket let us pull just the
+# REFC message (~5-10 MB) instead of the whole file (~80-200 MB),
+# turning a one-cycle fetch into ~200 MB total instead of ~3 GB.
+
+# Each idx line:
+#   record_num : byte_offset : d=YYYYMMDDHH : VAR : LEVEL : STEP :
+import re  # noqa: E402  (kept inline so the projection block is self-contained)
+
+_IDX_LINE_RE = re.compile(
+    r"^(?P<num>\d+):"
+    r"(?P<offset>\d+):"
+    r"d=(?P<date>\d+):"
+    r"(?P<var>[^:]+):"
+    r"(?P<level>[^:]+):"
+    r"(?P<step>[^:]*):"
+)
+
+
+class IdxRecord:
+    __slots__ = ("record_num", "byte_offset", "var", "level", "step")
+
+    def __init__(self, record_num: int, byte_offset: int, var: str, level: str, step: str):
+        self.record_num = record_num
+        self.byte_offset = byte_offset
+        self.var = var
+        self.level = level
+        self.step = step
+
+    def __repr__(self) -> str:
+        return (
+            f"IdxRecord(num={self.record_num}, offset={self.byte_offset}, "
+            f"var={self.var!r}, level={self.level!r}, step={self.step!r})"
+        )
+
+
+def parse_idx(idx_text: str) -> list[IdxRecord]:
+    """Parse a GRIB2 ``.idx`` sidecar file into a list of records.
+
+    Lines that don't match the expected format are silently skipped.
+    """
+    records: list[IdxRecord] = []
+    for line in idx_text.strip().splitlines():
+        m = _IDX_LINE_RE.match(line)
+        if m is None:
+            continue
+        records.append(
+            IdxRecord(
+                record_num=int(m.group("num")),
+                byte_offset=int(m.group("offset")),
+                var=m.group("var"),
+                level=m.group("level"),
+                step=m.group("step"),
+            )
+        )
+    return records
+
+
+def find_refc_records(records: list[IdxRecord]) -> list[tuple[IdxRecord, int]]:
+    """Return [(refc_record, end_byte)] entries for every REFC message in the file.
+
+    A subh file contains multiple sub-hourly steps; each step has its
+    own REFC message.  We return all of them so the caller can pick
+    by step (e.g. ``"15 min fcst"``).
+
+    ``end_byte`` is the byte offset of the next record minus one
+    (inclusive HTTP Range), or ``-1`` if the REFC record is the last
+    one in the file (caller should issue ``Range: bytes=START-``).
+    """
+    out: list[tuple[IdxRecord, int]] = []
+    for i, rec in enumerate(records):
+        if rec.var != "REFC":
+            continue
+        if i + 1 < len(records):
+            end = records[i + 1].byte_offset - 1
+        else:
+            end = -1
+        out.append((rec, end))
+    return out
+
+
+def subh_url(run: datetime, lead_hour: int, *, bucket: str | None = None) -> str:
+    """Construct the S3 URL for a HRRR subh file.
+
+    ``run`` is the model initialisation time (UTC, hour-aligned).
+    ``lead_hour`` is the forecast hour (1..18).  Returned URL points
+    at the ``wrfsubhf{FF}.grib2`` file; append ``.idx`` for the sidecar.
+    """
+    if bucket is None:
+        bucket = settings.hrrr_s3_bucket
+    date = run.strftime("%Y%m%d")
+    hh = run.strftime("%H")
+    ff = f"{lead_hour:02d}"
+    return (
+        f"https://{bucket}.s3.amazonaws.com/hrrr.{date}/conus/"
+        f"hrrr.t{hh}z.wrfsubhf{ff}.grib2"
+    )
+
+
+async def fetch_idx(
+    url: str, client: httpx.AsyncClient
+) -> list[IdxRecord]:
+    """Fetch and parse a ``.idx`` sidecar."""
+    resp = await client.get(url + ".idx")
+    resp.raise_for_status()
+    return parse_idx(resp.text)
+
+
+async def fetch_byte_range(
+    url: str, start: int, end: int, client: httpx.AsyncClient
+) -> bytes:
+    """Fetch a byte range from a URL.  ``end == -1`` means to EOF."""
+    if end == -1:
+        range_header = f"bytes={start}-"
+    else:
+        range_header = f"bytes={start}-{end}"
+    resp = await client.get(url, headers={"Range": range_header})
+    resp.raise_for_status()
+    return resp.content
+
+
+# Lazily import the eccodes-stderr suppressor so this module's import
+# graph mirrors the IFS / MRMS pattern (sources.py owns the helper).
+def _suppress_eccodes_stderr():
+    from librewxr.data.sources import _suppress_eccodes_stderr as _s
+    return _s()
+
+
+def decode_refc_message(grib_bytes: bytes) -> np.ndarray | None:
+    """Decode a single GRIB2 message containing REFC into a 2D float32 array.
+
+    Returns ``None`` if cfgrib cannot parse the bytes; callers retry.
+    The shape is ``(HRRR_GRID_HEIGHT, HRRR_GRID_WIDTH)``.
+    """
+    import xarray as xr
+
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".grib2", delete=False) as tmp:
+            tmp.write(grib_bytes)
+            tmp_path = tmp.name
+        with _suppress_eccodes_stderr():
+            ds = xr.open_dataset(
+                tmp_path,
+                engine="cfgrib",
+                backend_kwargs={"indexpath": ""},  # don't write a .idx next to tmp
+            )
+        ds = ds.compute()
+    except Exception:
+        logger.exception("Failed to decode HRRR REFC GRIB2 message")
+        return None
+    finally:
+        if tmp_path is not None:
+            try:
+                Path(tmp_path).unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    # cfgrib names HRRR's composite reflectivity ``refc`` (lowercase).
+    # If for any reason the variable comes back under a different key
+    # (e.g. a future codetable change), fall back to the first 2D var.
+    if "refc" in ds.data_vars:
+        arr = ds["refc"].values
+    else:
+        for name, da in ds.data_vars.items():
+            if da.ndim == 2 and da.shape == (HRRR_GRID_HEIGHT, HRRR_GRID_WIDTH):
+                logger.warning(
+                    "HRRR REFC variable not named 'refc' (got %r); using fallback",
+                    name,
+                )
+                arr = da.values
+                break
+        else:
+            logger.warning(
+                "HRRR GRIB2 message did not contain a recognisable REFC field"
+            )
+            return None
+
+    if arr.shape != (HRRR_GRID_HEIGHT, HRRR_GRID_WIDTH):
+        logger.warning(
+            "HRRR REFC has unexpected shape %s (expected %s); skipping",
+            arr.shape,
+            (HRRR_GRID_HEIGHT, HRRR_GRID_WIDTH),
+        )
+        return None
+
+    # cfgrib returns HRRR with the j-axis (rows) flipped relative to the
+    # image-convention our grid_indices() assumes: row 0 lands at the
+    # SOUTH edge of the grid (lat ~21°N), not the north (lat ~52°N).
+    # Flip vertically so row 0 = north.  Verify against cfgrib's own
+    # latitude coordinate when available so the code self-corrects if a
+    # future cfgrib release ever normalises the orientation upstream.
+    if "latitude" in ds.coords:
+        lat_top = float(ds["latitude"].values[0, 0])
+        lat_bot = float(ds["latitude"].values[-1, 0])
+        needs_flip = lat_top < lat_bot
+    else:
+        # No coord to verify against — assume the historically-observed
+        # HRRR-on-cfgrib orientation (row 0 = south) and flip.
+        needs_flip = True
+    if needs_flip:
+        arr = np.flipud(arr)
+
+    return np.ascontiguousarray(arr, dtype=np.float32)
+
+
+def encode_dbz(refc: np.ndarray) -> np.ndarray:
+    """Convert raw dBZ float32 → uint8 encoded values matching the radar pipeline.
+
+    Encoding: pixel = clip((dBZ + 32) * 2, 0, 255).  Non-finite cells
+    become 0 (no precipitation) so they integrate cleanly with the rest
+    of the rendering pipeline.
+    """
+    safe = np.where(np.isfinite(refc), refc, -32.0)
+    return np.clip((safe + 32.0) * 2.0 + 0.5, 0, 255).astype(np.uint8)
+
+
+# ── Subh frame timing helpers ─────────────────────────────────────────
+
+# Subh files publish four 15-minute steps per forecast hour and label
+# each step's idx entry with the *absolute* lead time in minutes
+# ("75 min fcst" in subh02, not "15 min fcst").  ``wrfsubhf01`` covers
+# R+0:15..R+1:00, ``wrfsubhf02`` covers R+1:15..R+2:00, etc.
+
+SUBH_INTERVAL_SECONDS = 15 * 60
+
+_STEP_FCST_RE = re.compile(r"^(\d+) min fcst$")
+
+
+def lead_seconds_for_step(step_label: str) -> int | None:
+    """Parse an idx step label ("NN min fcst") to total lead seconds.
+
+    Returns ``None`` for non-instantaneous steps (e.g. ``"70-75 min ave
+    fcst"``) — those aren't REFC entries anyway, but checking keeps the
+    parse defensive.
+    """
+    m = _STEP_FCST_RE.match(step_label)
+    if m is None:
+        return None
+    return int(m.group(1)) * 60
+
+
+def floor_hour(ts: int) -> int:
+    """Floor a Unix timestamp to the start of its UTC hour."""
+    return (ts // 3600) * 3600
+
+
+def latest_published_run(now_ts: int, publish_delay_seconds: int) -> int:
+    """Most recent run we'd expect to be available given a publish delay."""
+    return floor_hour(now_ts - publish_delay_seconds)
+
+
+def bracket_subh_leads(lead_seconds: int) -> tuple[int, int, float]:
+    """For a desired lead, return ``(L0, L1, alpha)`` where L0 ≤ L < L1.
+
+    Both L0 and L1 are exact subh frame leads (multiples of 900s, ≥ 900s).
+    Alpha is the lerp weight: 0 at L0, 1 at L1.
+
+    For ``lead_seconds < 900`` (before the first subh frame), the
+    bracket falls back to the previous run's last subh frames; the
+    caller (``HRRRGrid._pick_run``) handles that by selecting an
+    earlier run and recomputing.
+    """
+    if lead_seconds < SUBH_INTERVAL_SECONDS:
+        # Caller should have rolled to a previous run; signal by returning
+        # a clamped bracket at L0=L1=900 so a ``has_data_at`` check fails
+        # cleanly without raising.
+        return SUBH_INTERVAL_SECONDS, SUBH_INTERVAL_SECONDS, 0.0
+    l0 = (lead_seconds // SUBH_INTERVAL_SECONDS) * SUBH_INTERVAL_SECONDS
+    l1 = l0 + SUBH_INTERVAL_SECONDS
+    alpha = (lead_seconds - l0) / SUBH_INTERVAL_SECONDS
+    return l0, l1, alpha
+
+
+# ── HRRRGrid: the public NWPSource implementation ─────────────────────
+
+
+class HRRRGrid:
+    """NOAA HRRR sub-hourly composite reflectivity, sampled in native LCC.
+
+    Implements the NWPSource Protocol.  Frames are stored at native 3 km
+    LCC resolution as uint8 dBZ-encoded arrays keyed by ``(run_unix_ts,
+    lead_seconds)``.  Sampling at a query (lat, lon, ts) does:
+
+    1. Pick the freshest run whose subh forecast covers ``ts``.
+    2. Lerp between the two bracketing 15-min subh frames in time.
+    3. Project the query (lat, lon) into the LCC grid and sample.
+    """
+
+    name = "hrrr"
+
+    def __init__(self):
+        # (run_ts, lead_seconds) -> memmap-backed uint8 array on the LCC grid
+        self._frames: dict[tuple[int, int], np.ndarray] = {}
+        self._memmap_dir = Path(tempfile.mkdtemp(prefix="librewxr_hrrr_"))
+        self._client: httpx.AsyncClient | None = None
+        self._latest_run_ts: int | None = None
+        self._fetch_lock = asyncio.Lock()
+        logger.info("HRRR memmap directory: %s", self._memmap_dir)
+
+    # ── Memory management ────────────────────────────────────────────
+
+    def _to_memmap(self, name: str, data: np.ndarray) -> np.ndarray:
+        path = self._memmap_dir / f"{name}.dat"
+        mm = np.memmap(path, dtype=data.dtype, mode="w+", shape=data.shape)
+        mm[:] = data
+        mm.flush()
+        del mm
+        return np.memmap(path, dtype=data.dtype, mode="r", shape=data.shape)
+
+    def _memmap_path_for(self, run_ts: int, lead_seconds: int) -> Path:
+        return self._memmap_dir / f"r{run_ts}_l{lead_seconds}.dat"
+
+    @property
+    def data_bytes(self) -> int:
+        return sum(arr.nbytes for arr in self._frames.values())
+
+    @property
+    def latest_run_iso(self) -> str | None:
+        if self._latest_run_ts is None:
+            return None
+        return datetime.fromtimestamp(self._latest_run_ts, tz=timezone.utc).isoformat()
+
+    @property
+    def frame_count(self) -> int:
+        return len(self._frames)
+
+    # ── NWPSource Protocol ───────────────────────────────────────────
+
+    def domain_mask(self, lat: np.ndarray, lon: np.ndarray) -> np.ndarray:
+        return domain_mask(lat, lon)
+
+    def has_data(self) -> bool:
+        return bool(self._frames)
+
+    def has_data_at(self, timestamp: int) -> bool:
+        run = self._pick_run(timestamp)
+        if run is None:
+            return False
+        lead = timestamp - run
+        l0, l1, _ = bracket_subh_leads(lead)
+        return ((run, l0) in self._frames) and ((run, l1) in self._frames)
+
+    def get_snow_mask(
+        self,
+        lat: np.ndarray,
+        lon: np.ndarray,
+        timestamp: int | None = None,
+    ) -> np.ndarray:
+        # Phase 2 v1: HRRR doesn't surface a precomputed snow ratio.  The
+        # chain falls through to ECMWF for snow classification, which
+        # already gets it right at IFS resolution.  Returning all-False
+        # here means the chain dispatcher will skip HRRR for snow_mask
+        # and use the next source (IFS) — exactly what we want.
+        return np.zeros(lat.shape, dtype=bool)
+
+    def sample(
+        self,
+        lat: np.ndarray,
+        lon: np.ndarray,
+        timestamp: int | None = None,
+        bilinear: bool = False,
+    ) -> np.ndarray:
+        if timestamp is None or not self._frames:
+            return np.zeros(lat.shape, dtype=np.uint8)
+
+        run = self._pick_run(timestamp)
+        if run is None:
+            return np.zeros(lat.shape, dtype=np.uint8)
+
+        lead = timestamp - run
+        l0, l1, alpha = bracket_subh_leads(lead)
+        f0 = self._frames.get((run, l0))
+        f1 = self._frames.get((run, l1))
+        if f0 is None or f1 is None:
+            return np.zeros(lat.shape, dtype=np.uint8)
+
+        # Lerp the two subh frames in float, then sample at fractional grid index.
+        if alpha == 0.0:
+            grid = f0
+        elif alpha == 1.0:
+            grid = f1
+        else:
+            grid = ((1.0 - alpha) * f0.astype(np.float32) + alpha * f1.astype(np.float32) + 0.5).astype(np.uint8)
+
+        return _sample_grid(grid, lat, lon, bilinear=bilinear)
+
+    # ── Run selection ────────────────────────────────────────────────
+
+    def _pick_run(self, timestamp: int) -> int | None:
+        """Pick the freshest run whose subh bracket for ``timestamp`` is loaded.
+
+        Walks runs newest-first.  A run R is considered usable iff:
+
+        - ``R + 0:15 ≤ T ≤ R + 18:00`` (T inside the subh forecast horizon)
+        - both bracketing subh frames ``(R, L0)`` and ``(R, L1)`` exist in
+          the store right now.
+
+        The "bracket loaded" check matters during run rollover: when a
+        fresh run starts publishing and we've fetched only some of its
+        subh files, ``_pick_run`` would otherwise return the new run even
+        for queries whose bracket isn't loaded yet — causing
+        ``has_data_at`` to return False and the chain to fall through to
+        IFS for those frames.  Falling back to the previous run keeps the
+        nowcast loop visually consistent across hour rollovers.
+        """
+        loaded_runs = sorted({r for (r, _) in self._frames}, reverse=True)
+        for run in loaded_runs:
+            lead = timestamp - run
+            if not (SUBH_INTERVAL_SECONDS <= lead <= 18 * 3600):
+                continue
+            l0, l1, _ = bracket_subh_leads(lead)
+            if (run, l0) in self._frames and (run, l1) in self._frames:
+                return run
+        return None
+
+    # ── Fetch ────────────────────────────────────────────────────────
+
+    async def _get_client(self) -> httpx.AsyncClient:
+        if self._client is None or self._client.is_closed:
+            self._client = httpx.AsyncClient(
+                timeout=httpx.Timeout(60.0, connect=10.0),
+                follow_redirects=True,
+            )
+        return self._client
+
+    async def fetch(
+        self,
+        now_ts: int | None = None,
+        history_seconds: int = 0,
+        horizon_seconds: int = 60 * 60,
+    ) -> None:
+        """Refresh the in-memory subh window.
+
+        Called by RadarFetcher each cycle.  Determines all runs whose
+        forecasts can cover the active window ``[now − history, now +
+        horizon]`` and fetches the relevant subh files from each, so
+        every valid time in the window is served by a recent forecast.
+
+        Multiple runs are needed because each HRRR run only forecasts
+        forward from its init time: the freshest run can't cover ``ts``
+        values earlier than ``run + 15min``.  For radar-history times
+        we walk back through hourly runs as needed; ``_pick_run`` then
+        chooses the freshest loaded run that has the bracket frames in
+        store at sample time.
+
+        Already-loaded frames are skipped.  Frames whose valid time
+        falls outside the active window are evicted.
+        """
+        async with self._fetch_lock:
+            if now_ts is None:
+                now_ts = int(datetime.now(tz=timezone.utc).timestamp())
+
+            publish_delay = settings.hrrr_publish_delay_minutes * 60
+            latest_run_ts = latest_published_run(now_ts, publish_delay)
+            if self._latest_run_ts is None or latest_run_ts > self._latest_run_ts:
+                self._latest_run_ts = latest_run_ts
+
+            window_start = now_ts - history_seconds
+            window_end = now_ts + horizon_seconds
+
+            # Enumerate runs that could cover any ts in the window.  A
+            # run R covers valid times in [R + 15min, R + 18h], so the
+            # earliest run we'd need is the one whose horizon barely
+            # reaches window_start (R + 18h ≈ window_start).  In
+            # practice for a 2h history we need the latest run plus 1-2
+            # earlier hourly runs.  Cap on the new side at the latest
+            # published run.
+            earliest_run = floor_hour(window_start - SUBH_INTERVAL_SECONDS)
+            runs_to_consider = list(range(earliest_run, latest_run_ts + 1, 3600))
+            if not runs_to_consider:
+                logger.debug("HRRR fetch: no runs available for window")
+                return
+
+            client = await self._get_client()
+
+            total_fetched = 0
+            total_failed = 0
+            for run_ts in runs_to_consider:
+                run_dt = datetime.fromtimestamp(run_ts, tz=timezone.utc)
+                # Forecast hours of this run that overlap the active window.
+                # Each subh file H covers leads (H-1)*3600+900 .. H*3600.
+                # Extend the search by one bracket interval on each side so
+                # the L1 frame for queries at the future edge of the window
+                # — and the L0 frame at the past edge — are included.
+                min_lead = max(
+                    SUBH_INTERVAL_SECONDS,
+                    window_start - run_ts - SUBH_INTERVAL_SECONDS,
+                )
+                max_lead = min(
+                    18 * 3600,
+                    window_end - run_ts + SUBH_INTERVAL_SECONDS,
+                )
+                if max_lead < min_lead:
+                    continue
+                min_hour = max(1, -(-min_lead // 3600))
+                max_hour = min(18, -(-max_lead // 3600))
+
+                for fh in range(int(min_hour), int(max_hour) + 1):
+                    added = await self._fetch_one_subh_file(run_dt, fh, client)
+                    if added > 0:
+                        total_fetched += added
+                        logger.debug(
+                            "HRRR: +%d frame(s) from run %sZ fh=%d",
+                            added, run_dt.strftime("%Y%m%d%H"), fh,
+                        )
+                    elif added < 0:
+                        total_failed += 1
+
+            self._evict_outside_window(window_start, window_end)
+
+            if total_fetched:
+                logger.info(
+                    "HRRR: %d subh frame(s) ingested across %d run(s); "
+                    "store now holds %d frame(s)",
+                    total_fetched, len(runs_to_consider), len(self._frames),
+                )
+            elif total_failed:
+                logger.warning(
+                    "HRRR: no frames ingested (%d file(s) failed)",
+                    total_failed,
+                )
+
+    async def _fetch_one_subh_file(
+        self, run: datetime, lead_hour: int, client: httpx.AsyncClient
+    ) -> int:
+        """Fetch every REFC frame from a single subh file. Returns frames added.
+
+        Returns -1 to signal a fetch error (idx unreachable, etc.).
+        """
+        run_ts = int(run.timestamp())
+        url = subh_url(run, lead_hour)
+        try:
+            records = await fetch_idx(url, client)
+        except httpx.HTTPError as e:
+            logger.warning("HRRR idx fetch failed for %s: %s", url, e)
+            return -1
+
+        added = 0
+        for rec, end in find_refc_records(records):
+            lead_seconds = lead_seconds_for_step(rec.step)
+            if lead_seconds is None:
+                continue
+            key = (run_ts, lead_seconds)
+            if key in self._frames:
+                continue
+
+            try:
+                grib_bytes = await fetch_byte_range(
+                    url, rec.byte_offset, end, client
+                )
+            except httpx.HTTPError as e:
+                logger.warning(
+                    "HRRR REFC byte-range fetch failed for %s lead=%ds: %s",
+                    url, lead_seconds, e,
+                )
+                continue
+
+            arr = decode_refc_message(grib_bytes)
+            if arr is None:
+                continue
+
+            encoded = encode_dbz(arr)
+            mm = self._to_memmap(f"r{run_ts}_l{lead_seconds}", encoded)
+            self._frames[key] = mm
+            added += 1
+
+        return added
+
+    # ── Eviction ─────────────────────────────────────────────────────
+
+    def _evict_outside_window(self, window_start: int, window_end: int) -> None:
+        """Drop frames whose valid time falls outside the active window.
+
+        Slack is one full bracket interval (15 min) on each side so the
+        bracketing L1 frame at the future edge — and the L0 frame at the
+        past edge — survive long enough for ``sample`` at the window
+        boundary to find both halves of its bracket.
+        """
+        slack = SUBH_INTERVAL_SECONDS
+        ws = window_start - slack
+        we = window_end + slack
+        stale = []
+        for key in self._frames:
+            run_ts, lead = key
+            valid_time = run_ts + lead
+            if valid_time < ws or valid_time > we:
+                stale.append(key)
+        for key in stale:
+            self._frames.pop(key, None)
+            try:
+                self._memmap_path_for(*key).unlink(missing_ok=True)
+            except OSError:
+                pass
+        if stale:
+            logger.info("HRRR: evicted %d out-of-window subh frame(s)", len(stale))
+
+    # ── Lifecycle ────────────────────────────────────────────────────
+
+    async def close(self) -> None:
+        self._frames.clear()
+        if self._client is not None and not self._client.is_closed:
+            await self._client.aclose()
+        self._client = None
+        shutil.rmtree(self._memmap_dir, ignore_errors=True)
+        logger.info("HRRR memmap directory cleaned up")
+
+
+# ── Grid sampling ────────────────────────────────────────────────────
+
+
+def _sample_grid(
+    grid: np.ndarray,
+    lat: np.ndarray,
+    lon: np.ndarray,
+    *,
+    bilinear: bool = False,
+) -> np.ndarray:
+    """Sample a uint8 LCC grid at (lat, lon) points.
+
+    Returns ``np.ndarray`` of dtype uint8, shape ``lat.shape``.  Points
+    outside the grid yield 0.
+    """
+    row_f, col_f = grid_indices(lat, lon)
+
+    if not bilinear:
+        row = np.rint(row_f).astype(np.int32)
+        col = np.rint(col_f).astype(np.int32)
+        in_domain = (
+            (row >= 0)
+            & (row < HRRR_GRID_HEIGHT)
+            & (col >= 0)
+            & (col < HRRR_GRID_WIDTH)
+        )
+        out = np.zeros(lat.shape, dtype=np.uint8)
+        if in_domain.any():
+            out[in_domain] = grid[row[in_domain], col[in_domain]]
+        return out
+
+    # Bilinear path mirrors ECMWFGrid.sample's bilinear branch.
+    r0 = np.floor(row_f).astype(np.int32)
+    c0 = np.floor(col_f).astype(np.int32)
+    r1 = r0 + 1
+    c1 = c0 + 1
+
+    in_domain = (
+        (r0 >= 0)
+        & (r1 < HRRR_GRID_HEIGHT)
+        & (c0 >= 0)
+        & (c1 < HRRR_GRID_WIDTH)
+    )
+
+    r0c = np.clip(r0, 0, HRRR_GRID_HEIGHT - 1)
+    r1c = np.clip(r1, 0, HRRR_GRID_HEIGHT - 1)
+    c0c = np.clip(c0, 0, HRRR_GRID_WIDTH - 1)
+    c1c = np.clip(c1, 0, HRRR_GRID_WIDTH - 1)
+
+    dr = np.clip(row_f - r0, 0.0, 1.0).astype(np.float32)
+    dc = np.clip(col_f - c0, 0.0, 1.0).astype(np.float32)
+
+    v00 = grid[r0c, c0c].astype(np.float32)
+    v01 = grid[r0c, c1c].astype(np.float32)
+    v10 = grid[r1c, c0c].astype(np.float32)
+    v11 = grid[r1c, c1c].astype(np.float32)
+
+    # Don't bleed precipitation into adjacent zero cells (matches ECMWF
+    # bilinear sampling's clear-sky guard).
+    any_zero = (v00 == 0) | (v01 == 0) | (v10 == 0) | (v11 == 0)
+    interp = (
+        v00 * (1 - dr) * (1 - dc)
+        + v01 * (1 - dr) * dc
+        + v10 * dr * (1 - dc)
+        + v11 * dr * dc
+    )
+    sampled = np.where(any_zero, v00, interp)
+    out = np.clip(sampled + 0.5, 0, 255).astype(np.uint8)
+    out[~in_domain] = 0
+    return out

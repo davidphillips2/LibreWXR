@@ -19,6 +19,7 @@ from librewxr.data.cloud_grid import CloudGrid
 from librewxr.data.coverage import build_coverage_masks, build_feather_masks
 from librewxr.data.ecmwf_grid import ECMWFGrid
 from librewxr.data.fetcher import RadarFetcher
+from librewxr.data.hrrr_grid import HRRRGrid
 from librewxr.data.nowcast import NowcastGenerator, NowcastStore
 from librewxr.data.nwp_source import NWPChain
 from librewxr.data.radar_stations import MRMS_STATIONS
@@ -48,6 +49,7 @@ _LOG_TAGS = {
     "librewxr.data.coverage": "coverage",
     "librewxr.data.ecmwf_grid": "ifs",
     "librewxr.data.ecmwf_interpolation": "ifs",
+    "librewxr.data.hrrr_grid": "hrrr",
     "librewxr.data.cloud_grid": "cloud",
     "librewxr.data.cloud_cache": "cloud",
     "librewxr.data.nowcast": "nowcast",
@@ -91,7 +93,10 @@ async def lifespan(app: FastAPI):
     store = FrameStore(max_frames=settings.max_frames)
     cache = TileCache(max_mb=settings.tile_cache_mb)
     ecmwf_grid = ECMWFGrid()
-    nwp_chain = NWPChain([ecmwf_grid])
+    hrrr_grid = HRRRGrid() if settings.na_nwp_source == "hrrr" else None
+    chain_sources = [hrrr_grid] if hrrr_grid else []
+    chain_sources.append(ecmwf_grid)
+    nwp_chain = NWPChain(chain_sources)
     logger.info("NWP chain: [%s]", ", ".join(s.name for s in nwp_chain.sources))
     cloud = CloudGrid() if settings.satellite_enabled else None
     enabled = settings.get_enabled_regions()
@@ -155,6 +160,7 @@ async def lifespan(app: FastAPI):
     routes.frame_store = store
     routes.tile_cache = cache
     routes.ecmwf_grid = ecmwf_grid
+    routes.hrrr_grid = hrrr_grid
     routes.nwp_chain = nwp_chain
     routes.cloud_grid = cloud
     routes.tile_warmer = warmer
@@ -186,6 +192,7 @@ async def lifespan(app: FastAPI):
     fetcher = RadarFetcher(
         store, cache,
         ecmwf_grid=ecmwf_grid,
+        hrrr_grid=hrrr_grid,
         cloud_grid=cloud,
         nowcast_generator=nowcast_generator,
         warmer=warmer,

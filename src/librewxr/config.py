@@ -47,6 +47,13 @@ class Settings(BaseSettings):
     ecmwf_snow_ratio_threshold: float = 0.5
     ecmwf_max_timesteps: int = 0  # 0 = auto (derived from max_frames)
     ecmwf_interpolation: bool = True  # Optical flow interpolation of IFS hourly data to 10-min frames
+    # North American NWP source for the chain. "ifs" uses ECMWF IFS as the
+    # only source (current behavior). "hrrr" prepends NOAA HRRR-subh as the
+    # CONUS-priority source, falling back to IFS outside HRRR's domain.
+    na_nwp_source: Literal["ifs", "hrrr"] = "ifs"
+    hrrr_s3_bucket: str = "noaa-hrrr-bdp-pds"
+    hrrr_s3_region: str = "us-east-1"
+    hrrr_publish_delay_minutes: int = 55  # subh files typically publish ~55 min after run init
     nowcast_enabled: bool = True  # Generate precipitation nowcast via radar extrapolation + IFS
     nowcast_frames: int = 6  # Number of 10-min forecast frames (6 = 60 min)
     nowcast_blend_mode: str = "radar"  # "radar", "blended", or "ifs"

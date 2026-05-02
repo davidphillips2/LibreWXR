@@ -42,4 +42,5 @@ markers = [
     "sources: Radar source parsing tests (Canada, OPERA)",
     "tiles: Tile rendering, coordinates, and color scheme tests",
     "store: Frame store and tile cache tests",
+    "hrrr: HRRR grid, projection, and fetch tests",
 ]

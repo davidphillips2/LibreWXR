@@ -11,6 +11,7 @@ from librewxr.config import settings
 from librewxr.memory import release_memory
 from librewxr.data.cloud_grid import CloudGrid
 from librewxr.data.ecmwf_grid import ECMWFGrid
+from librewxr.data.hrrr_grid import HRRRGrid
 from librewxr.data.regions import REGIONS, RegionDef
 from librewxr.data.sources import (
     IEMSource,
@@ -39,6 +40,7 @@ class RadarFetcher:
         store: FrameStore,
         cache: TileCache,
         ecmwf_grid: ECMWFGrid | None = None,
+        hrrr_grid: HRRRGrid | None = None,
         cloud_grid: CloudGrid | None = None,
         nowcast_generator=None,
         warmer=None,
@@ -47,6 +49,7 @@ class RadarFetcher:
         self._store = store
         self._cache = cache
         self._ecmwf_grid = ecmwf_grid
+        self._hrrr_grid = hrrr_grid
         self._cloud_grid = cloud_grid
         self._nowcast_generator = nowcast_generator
         self._warmer = warmer
@@ -154,6 +157,8 @@ class RadarFetcher:
             closed.add(id(self._cacomp_msc_source))
         if self._ecmwf_grid:
             await self._ecmwf_grid.close()
+        if self._hrrr_grid:
+            await self._hrrr_grid.close()
         logger.info("Radar fetcher stopped")
 
     async def _backfill_then_loop(self) -> None:
@@ -229,6 +234,25 @@ class RadarFetcher:
                 await self._ecmwf_grid.fetch()
             except Exception:
                 logger.warning("ECMWF IFS fetch failed, global fallback may be stale")
+
+        # HRRR refreshes per cycle.  Idempotent: it skips frames already
+        # in the store so this is cheap once a run is fully ingested.
+        # The history window matches the radar buffer (max_frames *
+        # fetch_interval) so every displayed past frame uses HRRR for
+        # its out-of-radar-coverage pixels — no IFS↔HRRR seam between
+        # past and present frames.  HRRRGrid.fetch() walks back through
+        # multiple hourly runs as needed because each run only forecasts
+        # forward from its init time.
+        if self._hrrr_grid is not None:
+            try:
+                horizon = settings.nowcast_frames * settings.fetch_interval
+                history = settings.max_frames * settings.fetch_interval
+                await self._hrrr_grid.fetch(
+                    history_seconds=history,
+                    horizon_seconds=horizon,
+                )
+            except Exception:
+                logger.warning("HRRR fetch failed, CONUS NWP layer may be stale")
 
         # Cloud data loads in the background — never blocks radar startup.
         # Skip if a previous fetch is still running (downloading .om files

@@ -32,6 +32,7 @@ router = APIRouter()
 frame_store: FrameStore | None = None
 tile_cache: TileCache | None = None
 ecmwf_grid = None  # ECMWFGrid | None
+hrrr_grid = None  # HRRRGrid | None
 nwp_chain = None  # NWPChain | None
 cloud_grid = None  # CloudGrid | None
 tile_warmer = None  # TileWarmer | None
@@ -71,10 +72,14 @@ async def health():
     radar_bytes = frame_store.data_bytes
     tile_cache_bytes = tile_cache.total_bytes
     ecmwf_bytes = ecmwf_grid.data_bytes if ecmwf_grid else 0
+    hrrr_bytes = hrrr_grid.data_bytes if hrrr_grid else 0
     nowcast_bytes = nowcast_store.data_bytes if nowcast_store else 0
     satellite_bytes = cloud_grid.data_bytes if cloud_grid else 0
     coord_bytes = coord_cache_bytes()
-    tracked_bytes = radar_bytes + tile_cache_bytes + ecmwf_bytes + nowcast_bytes + satellite_bytes + coord_bytes
+    tracked_bytes = (
+        radar_bytes + tile_cache_bytes + ecmwf_bytes + hrrr_bytes
+        + nowcast_bytes + satellite_bytes + coord_bytes
+    )
     other_bytes = max(0, rss_bytes - tracked_bytes)
 
     return {
@@ -88,6 +93,7 @@ async def health():
                 "radar_frames_mb": round(radar_bytes / (1024 * 1024), 1),
                 "tile_cache_mb": round(tile_cache_bytes / (1024 * 1024), 1),
                 "ecmwf_grid_mb": round(ecmwf_bytes / (1024 * 1024), 1),
+                "hrrr_grid_mb": round(hrrr_bytes / (1024 * 1024), 1),
                 "nowcast_mb": round(nowcast_bytes / (1024 * 1024), 1),
                 "satellite_mb": round(satellite_bytes / (1024 * 1024), 1),
                 "coord_caches_mb": round(coord_bytes / (1024 * 1024), 1),
@@ -111,6 +117,15 @@ async def health():
             "loaded": ecmwf_grid is not None and ecmwf_grid.data is not None,
             "reference_time": ecmwf_grid.reference_time if ecmwf_grid else None,
             "timesteps": ecmwf_grid.timestep_count if ecmwf_grid else 0,
+        },
+        "hrrr_grid": {
+            "enabled": hrrr_grid is not None,
+            "loaded": hrrr_grid is not None and hrrr_grid.has_data(),
+            "latest_run": hrrr_grid.latest_run_iso if hrrr_grid else None,
+            "frames": hrrr_grid.frame_count if hrrr_grid else 0,
+        },
+        "nwp_chain": {
+            "sources": [s.name for s in nwp_chain.sources] if nwp_chain else [],
         },
         "nowcast": {
             "enabled": settings.nowcast_enabled,
