@@ -176,6 +176,22 @@ class TestZR:
         assert encoded[1] == 0
         assert encoded[2] > 0
 
+    def test_dbz_offset_shifts_uniformly(self):
+        # Encoding is pixel = (dBZ + 32) * 2, so +6 dBZ = +12 pixels.
+        rates = np.array([1.0, 5.0, 25.0])
+        base = precip_rate_to_dbz_encoded(rates, dbz_offset=0.0)
+        shifted = precip_rate_to_dbz_encoded(rates, dbz_offset=6.0)
+        for b, s in zip(base, shifted):
+            if b > 0:
+                assert int(s) - int(b) == 12
+
+    def test_zero_rate_offset_still_zero(self):
+        # Even with a positive offset, zero rate must encode to 0.
+        encoded = precip_rate_to_dbz_encoded(
+            np.array([0.0, 0.0]), dbz_offset=10.0,
+        )
+        assert (encoded == 0).all()
+
 
 # ── Decode orientation ────────────────────────────────────────────────
 

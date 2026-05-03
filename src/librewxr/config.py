@@ -60,6 +60,13 @@ class Settings(BaseSettings):
     eu_nwp_source: Literal["ifs", "icon_eu"] = "ifs"
     icon_eu_base_url: str = "https://opendata.dwd.de/weather/nwp/icon-eu/grib"
     icon_eu_publish_delay_minutes: int = 240  # main runs typically publish ~3-4h after init; 4h is conservative
+    # dBZ calibration shift applied after Z-R conversion of ICON-EU
+    # precipitation rates.  Marshall-Palmer (Z = 200 * R^1.6) is for
+    # stratiform rain at the surface; radar reflectivity is sampled at
+    # the brightest part of the storm column and tends to read 5-10
+    # dBZ higher than the surface rate would predict.  Tune up to make
+    # convective cells closer in colour to OPERA radar.
+    icon_eu_dbz_offset: float = 6.0
     nowcast_enabled: bool = True  # Generate precipitation nowcast via radar extrapolation + IFS
     nowcast_frames: int = 6  # Number of 10-min forecast frames (6 = 60 min)
     nowcast_blend_mode: str = "radar"  # "radar", "blended", or "model"

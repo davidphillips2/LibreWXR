@@ -104,18 +104,24 @@ ZR_A_RAIN = 200.0
 ZR_B_RAIN = 1.6
 
 
-def precip_rate_to_dbz_encoded(precip_mm_per_hour: np.ndarray) -> np.ndarray:
+def precip_rate_to_dbz_encoded(
+    precip_mm_per_hour: np.ndarray,
+    dbz_offset: float = 0.0,
+) -> np.ndarray:
     """Convert mm/h precip rate → uint8 dBZ encoded (pixel = (dBZ+32)*2).
 
     Negative or non-finite values map to 0 (no precipitation).  Uses
     Marshall-Palmer rain Z-R: Z = 200 * R^1.6, dBZ = 10 * log10(Z).
+    ``dbz_offset`` shifts the resulting dBZ uniformly to compensate for
+    the model-vs-radar intensity bias (radar reads the brightest part
+    of the storm column; the model gives surface rate).
     """
     rate = np.where(np.isfinite(precip_mm_per_hour), precip_mm_per_hour, 0.0)
     rate = np.maximum(rate, 0.0)
     # Z = a * R^b — guard log10 against zero rate
     eps = 1e-6
     z = ZR_A_RAIN * np.power(rate + eps, ZR_B_RAIN)
-    dbz = 10.0 * np.log10(np.maximum(z, eps))
+    dbz = 10.0 * np.log10(np.maximum(z, eps)) + dbz_offset
     encoded = np.clip((dbz + 32.0) * 2.0 + 0.5, 0, 255)
     # Zero-rate sentinel: clamp to 0 so the downstream noise floor and
     # both-zero blend logic both see "no precipitation" rather than the
@@ -573,7 +579,10 @@ class ICONEUGrid:
             return -1
 
         rate_mm_per_hour = accum - prev
-        encoded = precip_rate_to_dbz_encoded(rate_mm_per_hour)
+        encoded = precip_rate_to_dbz_encoded(
+            rate_mm_per_hour,
+            dbz_offset=settings.icon_eu_dbz_offset,
+        )
         mm = self._to_memmap(f"r{run_ts}_l{lead_seconds}", encoded)
         self._frames[(run_ts, lead_seconds)] = mm
         self._accum[(run_ts, step_hour)] = accum
