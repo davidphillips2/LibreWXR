@@ -361,17 +361,21 @@ def _blend_nowcast(
         lat_grid, lon_grid = tile_pixel_latlons(z, x, y, tile_size)
 
     # Sample NWP for ALL pixels (not just uncovered)
-    ifs_values = nwp_chain.sample(
+    model_values = nwp_chain.sample(
         lat_grid, lon_grid, frame_timestamp, bilinear=smooth,
     )
 
-    # Soften IFS before blending to reduce spatial mismatch artifacts.
-    # IFS at 9km resolution has precipitation in slightly different locations
-    # than radar — blurring smooths the IFS contribution so the transition
-    # looks like a gradual handoff rather than ghosting/doubling.
-    ifs_f = ifs_values.astype(np.float32)
-    ksize = 5 if tile_size <= 256 else 7
-    ifs_f = cv2.GaussianBlur(ifs_f, (ksize, ksize), 0)
+    # Soften the model values before blending to reduce spatial mismatch
+    # artifacts where radar and the model disagree on storm position.
+    # Tuned for HRRR's 3 km native resolution: storm positions are within
+    # ~1-2 cells of radar, so a small kernel is enough.  Outside HRRR's
+    # CONUS domain the chain falls back to IFS at 9 km, where this
+    # under-blurs slightly — but the feather already handles the spatial
+    # transition between sources, and over-blurring kills HRRR's sharpness
+    # everywhere else, which is the worse trade-off.
+    model_f = model_values.astype(np.float32)
+    ksize = 3 if tile_size <= 256 else 5
+    model_f = cv2.GaussianBlur(model_f, (ksize, ksize), 0)
 
     # Build the spatial feather weight: union across all overlapping regions
     feather = np.zeros(lat_grid.shape, dtype=np.float32)
@@ -381,12 +385,12 @@ def _blend_nowcast(
     # Per-pixel effective radar weight
     effective_w = blend_weight * feather
 
-    # Blend: extrapolated radar × weight + IFS × (1 − weight)
+    # Blend: extrapolated radar × weight + model × (1 − weight)
     radar_f = radar_values.astype(np.float32)
-    blended = effective_w * radar_f + (1.0 - effective_w) * ifs_f
+    blended = effective_w * radar_f + (1.0 - effective_w) * model_f
 
     # Don't hallucinate precipitation where neither source has any
-    both_zero = (radar_values == 0) & (ifs_values == 0)
+    both_zero = (radar_values == 0) & (model_values == 0)
     result = np.clip(blended + 0.5, 0, 255).astype(np.uint8)
     result[both_zero] = 0
 

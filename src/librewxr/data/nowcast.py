@@ -265,7 +265,7 @@ class NowcastGenerator:
                 blend_weight = 0.0
             elif blend_mode == "radar":
                 blend_weight = 1.0
-            elif blend_mode == "ifs":
+            elif blend_mode == "model":
                 blend_weight = 0.0
             else:  # "blended" (default)
                 # Tuned for HRRR's native-resolution, dBZ-matched output.

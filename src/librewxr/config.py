@@ -56,7 +56,7 @@ class Settings(BaseSettings):
     hrrr_publish_delay_minutes: int = 55  # subh files typically publish ~55 min after run init
     nowcast_enabled: bool = True  # Generate precipitation nowcast via radar extrapolation + IFS
     nowcast_frames: int = 6  # Number of 10-min forecast frames (6 = 60 min)
-    nowcast_blend_mode: str = "radar"  # "radar", "blended", or "ifs"
+    nowcast_blend_mode: str = "radar"  # "radar", "blended", or "model"
     satellite_enabled: bool = True  # Fetch and serve IFS-derived cloud cover as satellite tiles
     satellite_max_frames: int = 12  # Number of hourly IFS cloud timesteps to keep
     cache_dir: str = ""  # Persistent cache directory for satellite grids; empty = in-memory only
