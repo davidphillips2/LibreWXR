@@ -273,10 +273,12 @@ async def radar_tile(
 
     frame = await frame_store.get_frame(timestamp)
     nowcast_blend = None
+    is_nowcast = False
     if frame is None and nowcast_store is not None:
         nc_frame, nowcast_blend = await nowcast_store.get_frame(timestamp)
         if nc_frame is not None:
             frame = nc_frame
+            is_nowcast = True
     if frame is None:
         raise HTTPException(status_code=404, detail="Frame not found")
 
@@ -319,8 +321,7 @@ async def radar_tile(
                 smooth=smooth,
                 snow=snow,
                 ext=ext,
-                ecmwf_grid=ecmwf_grid,
-                nwp_chain=nwp_chain,
+                frame_type="nowcast" if is_nowcast else "past",
             )
         )
 

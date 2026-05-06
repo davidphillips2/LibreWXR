@@ -128,10 +128,18 @@ class CloudGrid:
             return False
 
     def _fetch_sync(self) -> bool:
+        from librewxr.data.retry import retry_sync
+
         fs = self._get_fs()
         bucket = settings.ecmwf_s3_bucket
 
-        latest_raw = fs.cat(f"{bucket}/{S3_LATEST_PATH}")
+        latest_raw = retry_sync(
+            fs.cat, f"{bucket}/{S3_LATEST_PATH}",
+            log_name="Cloud latest.json",
+        )
+        if latest_raw is None:
+            logger.warning("Cloud cover: failed to fetch latest.json after retries")
+            return False
         latest = json.loads(latest_raw)
 
         if not latest.get("completed", False):
@@ -301,6 +309,8 @@ class CloudGrid:
         vt_clean = vt.replace("Z", "").replace(":", "")
         om_path = f"{run_prefix}/{vt_clean}.om"
 
+        from librewxr.data.retry import retry_sync
+
         # Download the entire .om file to a temp file, then read locally.
         # Cloud cover variables are stored at byte offsets that cause
         # pathologically slow random-access via fsspec Range requests
@@ -309,7 +319,12 @@ class CloudGrid:
         # instant local reads is dramatically faster.
         with tempfile.NamedTemporaryFile(suffix=".om") as tmp:
             t0 = time.monotonic()
-            fs.get(om_path, tmp.name)
+            result = retry_sync(
+                fs.get, om_path, tmp.name,
+                log_name=f"Cloud .om {vt}",
+            )
+            if result is None:
+                raise RuntimeError(f"Failed to download cloud timestep {vt} after retries")
             logger.info("Cloud .om download: %s (%.1fs)", vt, time.monotonic() - t0)
             reader = OmFileReader.from_path(tmp.name)
             try:

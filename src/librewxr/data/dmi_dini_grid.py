@@ -293,13 +293,20 @@ async def find_tp_message_offset(
     keepalive cuts the per-request overhead substantially compared to
     fresh connections.
     """
+    from librewxr.data.retry import retry_get
+
     offset = 0
     for _ in range(max_messages):
+        resp = await retry_get(
+            client, url, headers={"Range": f"bytes={offset}-{offset + 511}"},
+            log_name="DMI DINI header",
+        )
+        if resp is None:
+            return None
         try:
-            resp = await client.get(url, headers={"Range": f"bytes={offset}-{offset + 511}"})
             resp.raise_for_status()
-        except httpx.HTTPError as e:
-            logger.warning("DMI DINI header walk failed at offset %d: %s", offset, e)
+        except httpx.HTTPStatusError:
+            logger.warning("DMI DINI header walk HTTP error at offset %d", offset)
             return None
         chunk = resp.content
         if len(chunk) < 16 or chunk[:4] != b"GRIB":
@@ -709,16 +716,20 @@ class DMIDiniGrid:
             )
 
         offset, size = tp_loc
+        from librewxr.data.retry import retry_get
+        resp = await retry_get(
+            client, url,
+            headers={"Range": f"bytes={offset}-{offset + size - 1}"},
+            log_name="DMI DINI data",
+        )
+        if resp is None:
+            return -1
         try:
-            resp = await client.get(
-                url,
-                headers={"Range": f"bytes={offset}-{offset + size - 1}"},
-            )
             resp.raise_for_status()
-            grib_bytes = resp.content
-        except httpx.HTTPError as e:
+        except httpx.HTTPStatusError as e:
             logger.warning("DMI DINI fetch failed for %s: %s", url, e)
             return -1
+        grib_bytes = resp.content
 
         accum = decode_tp_message(grib_bytes)
         if accum is None:

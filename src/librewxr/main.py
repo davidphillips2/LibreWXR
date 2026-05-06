@@ -166,6 +166,8 @@ async def lifespan(app: FastAPI):
         executor=warmer_executor,
         enabled_regions=enabled,
         nowcast_store=nowcast_store,
+        ecmwf_grid=ecmwf_grid,
+        nwp_chain=nwp_chain,
     )
 
     # Memory pressure monitor
@@ -264,19 +266,6 @@ async def lifespan(app: FastAPI):
         logger.info(
             "Coordinate caches warmed: %d entries up to zoom %d (%.2fs)",
             warmed, settings.warm_coord_zoom, time.time() - start,
-        )
-
-    # Pre-render overview tiles in the background so zoomed-out views are
-    # served instantly from cache.  The fetcher re-triggers this after each
-    # fetch cycle so newly-arrived frames are warmed automatically.
-    if settings.warm_overview_zoom >= 0:
-        asyncio.create_task(
-            warmer.warm_overview(
-                ecmwf_grid=ecmwf_grid,
-                nwp_chain=nwp_chain,
-                max_zoom=settings.warm_overview_zoom,
-                max_zoom_regional=settings.warm_overview_zoom_regional,
-            )
         )
 
     yield

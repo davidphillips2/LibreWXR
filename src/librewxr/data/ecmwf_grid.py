@@ -210,11 +210,19 @@ class ECMWFGrid:
 
     def _fetch_sync(self) -> bool:
         """Synchronous fetch — runs in a thread to avoid blocking the event loop."""
+        from librewxr.data.retry import retry_sync
+
         fs = self._get_fs()
         bucket = settings.ecmwf_s3_bucket
 
         # Read latest.json to find current model run
-        latest_raw = fs.cat(f"{bucket}/{S3_LATEST_PATH}")
+        latest_raw = retry_sync(
+            fs.cat, f"{bucket}/{S3_LATEST_PATH}",
+            log_name="ECMWF IFS latest.json",
+        )
+        if latest_raw is None:
+            logger.warning("ECMWF IFS: failed to fetch latest.json after retries")
+            return False
         latest = json.loads(latest_raw)
 
         if not latest.get("completed", False):
@@ -339,7 +347,13 @@ class ECMWFGrid:
         vt_clean = vt.replace("Z", "").replace(":", "")
         om_path = f"{run_prefix}/{vt_clean}.om"
 
-        reader = OmFileReader.from_fsspec(fs, om_path)
+        from librewxr.data.retry import retry_sync
+        reader = retry_sync(
+            OmFileReader.from_fsspec, fs, om_path,
+            log_name=f"ECMWF IFS {vt}",
+        )
+        if reader is None:
+            raise RuntimeError(f"Failed to read ECMWF timestep {vt} after retries")
         try:
             precip_var = reader.get_child_by_name("precipitation")
             precip_raw = precip_var[:].flatten().astype(np.float32)

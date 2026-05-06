@@ -20,6 +20,7 @@ import xarray as xr
 from PIL import Image
 
 from librewxr.data.regions import RegionDef
+from librewxr.data.retry import retry_get
 
 logger = logging.getLogger(__name__)
 
@@ -93,7 +94,9 @@ class IEMSource:
     ) -> np.ndarray | None:
         try:
             client = await self._get_client()
-            resp = await client.get(url)
+            resp = await retry_get(client, url, log_name="IEM")
+            if resp is None:
+                return None
             if resp.status_code != 200:
                 logger.warning("Failed to fetch %s: HTTP %d", url, resp.status_code)
                 return None
@@ -346,7 +349,9 @@ class MSCCanadaSource:
         url = self._build_url(region, time_iso)
         try:
             client = await self._get_client()
-            resp = await client.get(url)
+            resp = await retry_get(client, url, log_name="MSC Canada")
+            if resp is None:
+                return None
             if resp.status_code != 200:
                 logger.warning(
                     "MSC Canada WMS fetch failed: HTTP %d (time=%s)",
@@ -462,8 +467,10 @@ class OperaSource:
         client = await self._get_client()
         for step in range(self._MAX_FALLBACK_STEPS + 1):
             url = self._url_for_timestamp(ts - step * 300)
+            resp = await retry_get(client, url, log_name="OPERA")
+            if resp is None:
+                return None
             try:
-                resp = await client.get(url)
                 if resp.status_code == 200:
                     return _parse_opera_hdf5(resp.content)
                 if resp.status_code == 404 and step < self._MAX_FALLBACK_STEPS:
@@ -474,7 +481,7 @@ class OperaSource:
                 )
                 return None
             except Exception:
-                logger.exception("Error fetching OPERA composite")
+                logger.exception("Error parsing OPERA composite")
                 return None
         return None
 
@@ -693,14 +700,12 @@ class MRMSSource:
                 return
 
             url = f"{self._base_url}/{self._product}/"
-            try:
-                client = await self._get_client()
-                resp = await client.get(url)
-                if resp.status_code != 200:
-                    logger.warning("MRMS directory listing failed: HTTP %d", resp.status_code)
-                    return
-            except Exception:
-                logger.exception("Error fetching MRMS directory listing")
+            client = await self._get_client()
+            resp = await retry_get(client, url, log_name="MRMS directory")
+            if resp is None:
+                return
+            if resp.status_code != 200:
+                logger.warning("MRMS directory listing failed: HTTP %d", resp.status_code)
                 return
 
             entries: list[tuple[datetime, str]] = []
@@ -728,27 +733,21 @@ class MRMSSource:
                 entries[-1][0].strftime("%Y%m%d-%H%M%S"),
             )
 
-    _MAX_RETRIES = 1  # retry once on transient connection errors
-
     async def _fetch_and_parse(
         self, url: str, region: RegionDef
     ) -> np.ndarray | None:
         """Download a GRIB2.gz file, parse, crop and resample to region."""
-        for attempt in range(self._MAX_RETRIES + 1):
-            try:
-                client = await self._get_client()
-                resp = await client.get(url)
-                if resp.status_code != 200:
-                    logger.warning(
-                        "MRMS fetch failed: HTTP %d (%s)", resp.status_code, url
-                    )
-                    return None
-            except Exception:
-                if attempt < self._MAX_RETRIES:
-                    logger.info("MRMS fetch error, retrying: %s", url)
-                    await asyncio.sleep(1)
-                    continue
-                logger.exception("Error fetching MRMS %s", url)
+        from librewxr.config import settings as _settings
+
+        client = await self._get_client()
+        for attempt in range(_settings.download_retries + 1):
+            resp = await retry_get(client, url, log_name="MRMS")
+            if resp is None:
+                return None
+            if resp.status_code != 200:
+                logger.warning(
+                    "MRMS fetch failed: HTTP %d (%s)", resp.status_code, url
+                )
                 return None
 
             try:
@@ -756,7 +755,7 @@ class MRMSSource:
             except EOFError:
                 # Truncated download (server dropped connection mid-stream).
                 # Retry the full download cycle once before giving up.
-                if attempt < self._MAX_RETRIES:
+                if attempt < _settings.download_retries:
                     logger.info(
                         "MRMS gzip truncated, retrying download: %s", url
                     )
@@ -764,7 +763,7 @@ class MRMSSource:
                     continue
                 logger.warning(
                     "MRMS gzip truncated after %d retries: %s",
-                    self._MAX_RETRIES, url,
+                    _settings.download_retries, url,
                 )
                 return None
             except Exception:

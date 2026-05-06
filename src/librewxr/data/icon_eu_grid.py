@@ -552,10 +552,13 @@ class ICONEUGrid:
             return 0
 
         url = file_url(run, step_hour, "tot_prec")
+        from librewxr.data.retry import retry_get
+        resp = await retry_get(client, url, log_name="ICON-EU")
+        if resp is None:
+            return -1
         try:
-            resp = await client.get(url)
             resp.raise_for_status()
-        except httpx.HTTPError as e:
+        except httpx.HTTPStatusError as e:
             logger.warning("ICON-EU fetch failed for %s: %s", url, e)
             return -1
 

@@ -62,7 +62,6 @@ class RadarFetcher:
         self._radar_cache = radar_cache
         self._task: asyncio.Task | None = None
         self._cloud_task: asyncio.Task | None = None
-        self._warm_task: asyncio.Task | None = None
         self._enabled_regions = [
             REGIONS[name] for name in settings.get_enabled_regions()
         ]
@@ -181,6 +180,8 @@ class RadarFetcher:
         try:
             await self._fetch_all_frames()
             await self._run_nowcast()
+            if self._warmer is not None and settings.warm_overview_zoom >= 0:
+                await self._warmer.warm_latest()
             self._schedule_warm()
         except Exception:
             logger.exception("Error in initial backfill")
@@ -200,25 +201,15 @@ class RadarFetcher:
             release_memory()
 
     def _schedule_warm(self) -> None:
-        """Pre-render overview tiles for any new frames in the background.
+        """Re-trigger overview warming for any previously-requested categories.
 
-        Idempotent: ``warm_overview`` short-circuits on already-cached tiles,
-        so re-running every cycle only spends real work on the 1–2 new
-        timestamps that just arrived. Skip if a previous warm pass is still
-        running so cycles can't pile up under load.
+        Only starts warm_overview if at least one frame type (past or
+        nowcast) has been triggered by a user request.  Skips if a
+        previous warm pass is still running.
         """
         if self._warmer is None or settings.warm_overview_zoom < 0:
             return
-        if self._warm_task is not None and not self._warm_task.done():
-            logger.debug("Warm pass still running, skipping this cycle")
-            return
-        self._warm_task = asyncio.create_task(
-            self._warmer.warm_overview(
-                ecmwf_grid=self._ecmwf_grid,
-                max_zoom=settings.warm_overview_zoom,
-                max_zoom_regional=settings.warm_overview_zoom_regional,
-            )
-        )
+        self._warmer.schedule_warm()
 
     async def _fetch_initial(self) -> None:
         """Quick startup: fetch auxiliary grids and latest radar frame only."""

@@ -39,5 +39,12 @@ services:
           # Override in .env: LIBREWXR_MEMORY=4G
           memory: ${LIBREWXR_MEMORY:-7G}
 
+  clear-cache:
+    image: alpine:latest
+    volumes:
+      - librewxr-cache:/data/cache
+    command: sh -c "rm -rf /data/cache/* && echo 'All caches cleared'"
+    restart: "no"
+
 volumes:
   librewxr-cache:

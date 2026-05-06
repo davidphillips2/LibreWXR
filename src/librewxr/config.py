@@ -100,6 +100,7 @@ class Settings(BaseSettings):
     tile_tracking_enabled: bool = True
     tile_tracking_min_zoom: int = 7  # Track only z >= this (overview zooms are pre-warmed anyway)
     tile_tracking_max_entries: int = 10_000  # Cap per-tile counters; halves when full
+    download_retries: int = 1  # Retries on transient download errors (0 = no retry, 1 = one retry)
     cors_origins: list[str] = ["*"]
 
     def get_ecmwf_max_timesteps(self) -> int:

@@ -258,7 +258,10 @@ async def fetch_idx(
     url: str, client: httpx.AsyncClient
 ) -> list[IdxRecord]:
     """Fetch and parse a ``.idx`` sidecar."""
-    resp = await client.get(url + ".idx")
+    from librewxr.data.retry import retry_get
+    resp = await retry_get(client, url + ".idx", log_name="HRRR idx")
+    if resp is None:
+        raise httpx.TransportError("failed to fetch idx after retries")
     resp.raise_for_status()
     return parse_idx(resp.text)
 
@@ -267,11 +270,16 @@ async def fetch_byte_range(
     url: str, start: int, end: int, client: httpx.AsyncClient
 ) -> bytes:
     """Fetch a byte range from a URL.  ``end == -1`` means to EOF."""
+    from librewxr.data.retry import retry_get
     if end == -1:
         range_header = f"bytes={start}-"
     else:
         range_header = f"bytes={start}-{end}"
-    resp = await client.get(url, headers={"Range": range_header})
+    resp = await retry_get(
+        client, url, headers={"Range": range_header}, log_name="HRRR data",
+    )
+    if resp is None:
+        raise httpx.TransportError("failed to fetch byte range after retries")
     resp.raise_for_status()
     return resp.content
 
