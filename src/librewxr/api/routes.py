@@ -1,14 +1,20 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (C) 2026 Joshua Kimsey
 import asyncio
+import httpx
 import logging
 import time
 import psutil
 
 from fastapi import APIRouter, HTTPException, Path, Query, Response
 
+from datetime import datetime
+
 from librewxr.api.models import (
+    AlertProperties,
+    AlertsResponse,
     ColorScheme,
+    GeoJSONFeature,
     RadarData,
     RadarTimestamp,
     SatelliteData,
@@ -44,6 +50,16 @@ radar_fetcher = None  # RadarFetcher | None
 tile_request_tracker: TileRequestTracker | None = None
 start_time: float = 0.0
 enabled_regions: list[str] | None = None
+
+# WMO alerts — set by main.py during startup
+alerts_store = None  # AlertsStore | None
+alerts_fetcher = None  # WMOAlertsFetcher | None
+alerts_enabled: bool = False
+
+# NWS point-lookup cache: {(lat, lon): (timestamp, list[GeoJSONFeature])}
+_nws_point_cache: dict[tuple[float, float], tuple[float, list[GeoJSONFeature]]] = {}
+_NWS_CACHE_TTL = 300  # 5 minutes
+_NWS_API_URL = "https://api.weather.gov/alerts/active"
 
 
 @router.get("/health")
@@ -179,6 +195,12 @@ async def health():
             if tile_request_tracker is not None
             else {"enabled": False}
         ),
+        "alerts": {
+            "enabled": alerts_enabled,
+            "count": alerts_store.count if alerts_store is not None else 0,
+            "last_updated": int(alerts_store.last_updated) if alerts_store is not None else 0,
+            "ingest_ok": alerts_store.fetch_success if alerts_store is not None else False,
+        } if alerts_enabled else {"enabled": False},
     }
 
 
@@ -426,3 +448,181 @@ async def satellite_tile(
         media_type=_content_type(ext),
         headers={"Cache-Control": f"public, max-age={max_age}"},
     )
+
+
+# ---------------------------------------------------------------------------
+# Alert helpers
+# ---------------------------------------------------------------------------
+
+def _parse_cap_time(value: str) -> int | None:
+    """Parse CAP ISO 8601 time string to Unix epoch."""
+    if not value:
+        return None
+    try:
+        return int(datetime.fromisoformat(value).timestamp())
+    except (ValueError, TypeError):
+        return None
+
+
+def _alert_not_expired(alert, now_utc: int) -> bool:
+    """Check if alert has not expired. Returns True for alerts without expires field."""
+    expires = _parse_cap_time(alert.expires)
+    return expires is None or expires > now_utc
+
+
+async def _fetch_nws_point_alerts(lat: float, lon: float) -> list[GeoJSONFeature]:
+    """Fetch NWS alerts for a specific lat/lon via the NWS point endpoint.
+
+    The NWS API returns GeoJSON with polygon geometry for all alert types,
+    including Tornado Watches which lack polygons in the global feed.
+    Results are cached for 5 minutes.
+    """
+    cache_key = (round(lat, 4), round(lon, 4))
+    now = time.time()
+    cached = _nws_point_cache.get(cache_key)
+    if cached is not None:
+        ts, features = cached
+        if now - ts < _NWS_CACHE_TTL:
+            return features
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(
+                f"{_NWS_API_URL}?point={lat},{lon}",
+                headers={"User-Agent": "(LibreWXR, librewxr@localhost)"},
+            )
+        if resp.status_code != 200:
+            logger.debug("NWS point API returned %d for %s,%s", resp.status_code, lat, lon)
+            return []
+        data = resp.json()
+    except Exception as exc:
+        logger.debug("NWS point API error for %s,%s: %s", lat, lon, exc)
+        return []
+
+    features: list[GeoJSONFeature] = []
+    for feature in data.get("features", []):
+        props = feature.get("properties", {})
+        geom = feature.get("geometry")
+
+        # Skip cancelled/test
+        status = props.get("status", "").lower()
+        msg_type = props.get("messageType", "").lower()
+        if status == "cancel" or msg_type == "test":
+            continue
+
+        # Use headline > event > description for title
+        headline = props.get("headline", "") or ""
+        event = props.get("event", "") or ""
+        description = props.get("description", "") or ""
+        title = headline or event or ""
+        desc = description or headline or ""
+
+        features.append(
+            GeoJSONFeature(
+                type="Feature",
+                properties=AlertProperties(
+                    title=title,
+                    severity=props.get("severity", "Unknown"),
+                    time=_parse_cap_time(props.get("effective", "")),
+                    expires=_parse_cap_time(props.get("expires", "")),
+                    description=desc,
+                    regions=[props.get("areaDesc", "")] if props.get("areaDesc") else [],
+                    uri=props.get("id", "") or feature.get("id", ""),
+                ),
+                geometry=geom,
+            )
+        )
+
+    _nws_point_cache[cache_key] = (now, features)
+    logger.debug("NWS point API: %d alerts cached for %s,%s", len(features), lat, lon)
+    return features
+
+
+@router.get("/v2/alerts", response_model=AlertsResponse)
+async def get_alerts(
+    lat: float | None = Query(None, ge=-90, le=90, description="Latitude for point lookup"),
+    lon: float | None = Query(None, ge=-180, le=180, description="Longitude for point lookup"),
+    bbox: str | None = Query(None, description="Bounding box: west,south,east,north"),
+    simplify: float = Query(1000.0, ge=0, description="Polygon simplification tolerance in meters (0=off)"),
+):
+    """Weather alerts as GeoJSON FeatureCollection.
+
+    - No params: all active alerts worldwide.
+    - lat+lon: alerts containing that point.  For US locations, also queries
+      the NWS point endpoint to include alerts (e.g. Tornado Watches) that
+      lack polygon geometry in the global feed.
+    - bbox: alerts intersecting the bounding box (polygon-only).
+    """
+    if not alerts_enabled or alerts_store is None:
+        raise HTTPException(status_code=503, detail="Alerts not available")
+
+    alerts = alerts_store.alerts
+    nws_point_features: list[GeoJSONFeature] = []
+
+    # Filter by point
+    if lat is not None and lon is not None:
+        from shapely.geometry import Point
+        point = Point(lon, lat)
+        alerts = [a for a in alerts if a.polygon is not None and a.polygon.intersects(point)]
+        # For US points, also fetch NWS point-specific alerts (with geometry)
+        if (-130 <= lon <= -60) and (20 <= lat <= 55):
+            nws_point_features = await _fetch_nws_point_alerts(lat, lon)
+    # Filter by bbox
+    elif bbox is not None:
+        parts = bbox.split(",")
+        if len(parts) != 4:
+            raise HTTPException(status_code=400, detail="bbox must be: west,south,east,north")
+        try:
+            w, s, e, n = map(float, parts)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="bbox values must be numeric")
+        if w < -180 or e > 180 or s < -90 or n > 90 or w > e or s > n:
+            raise HTTPException(status_code=400, detail="bbox values out of range")
+        from shapely.geometry import box
+        bbox_poly = box(w, s, e, n)
+        alerts = [a for a in alerts if a.polygon is not None and a.polygon.intersects(bbox_poly)]
+
+    # Expiry filter
+    now_utc = int(time.time())
+    alerts = [a for a in alerts if _alert_not_expired(a, now_utc)]
+
+    # Build GeoJSON features from WMO alerts
+    deg_per_meter = simplify / 111_000.0 if simplify > 0 else 0.0
+    from shapely.geometry import mapping
+    features: list[GeoJSONFeature] = []
+    seen_uris: set[str] = set()
+
+    for alert in alerts:
+        geom = alert.polygon
+        if deg_per_meter > 0 and geom is not None:
+            geom = geom.simplify(deg_per_meter, preserve_topology=True)
+
+        uri = alert.url
+        if uri in seen_uris:
+            continue
+        seen_uris.add(uri)
+
+        features.append(
+            GeoJSONFeature(
+                type="Feature",
+                properties=AlertProperties(
+                    title=alert.event,
+                    severity=alert.severity,
+                    time=_parse_cap_time(alert.effective),
+                    expires=_parse_cap_time(alert.expires),
+                    description=alert.description,
+                    regions=[alert.area_desc] if alert.area_desc else [],
+                    uri=uri,
+                ),
+                geometry=mapping(geom) if geom is not None else None,
+            )
+        )
+
+    # Merge NWS point features, deduplicating by URI
+    for feat in nws_point_features:
+        uri = feat.properties.uri
+        if uri and uri not in seen_uris:
+            seen_uris.add(uri)
+            features.append(feat)
+
+    return AlertsResponse(type="FeatureCollection", features=features)

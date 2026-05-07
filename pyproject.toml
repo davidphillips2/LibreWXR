@@ -23,6 +23,8 @@ dependencies = [
     "opencv-python-headless>=4.8",
     "cfgrib>=0.9.14",
     "xarray>=2024.1.0",
+    "lxml>=5.0",
+    "shapely>=2.0",
 ]
 
 [project.optional-dependencies]
@@ -45,4 +47,5 @@ markers = [
     "hrrr: HRRR grid, projection, and fetch tests",
     "icon_eu: ICON-EU grid, lat/lon, and fetch tests",
     "dmi_dini: DMI HARMONIE-AROME DINI grid, LCC, and fetch tests",
+    "alerts: WMO CAP weather alerts tests",
 ]

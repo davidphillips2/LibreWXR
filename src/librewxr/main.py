@@ -26,6 +26,8 @@ from librewxr.data.nowcast import NowcastGenerator, NowcastStore
 from librewxr.data.nwp_source import NWPChain
 from librewxr.data.radar_stations import MRMS_STATIONS
 from librewxr.data.store import FrameStore
+from librewxr.data.alerts_store import AlertsStore
+from librewxr.data.alerts_fetcher import WMOAlertsFetcher
 from librewxr.memory import MemoryMonitor, detect_memory_limit_mb
 from librewxr.tiles.cache import TileCache
 from librewxr.tiles.coordinates import (
@@ -62,6 +64,8 @@ _LOG_TAGS = {
     "librewxr.tiles.renderer": "tiles",
     "librewxr.tiles.satellite_renderer": "tiles",
     "librewxr.tiles.coordinates": "tiles",
+    "librewxr.data.alerts_fetcher": "alerts",
+    "librewxr.data.alerts_store": "alerts",
 }
 
 
@@ -188,6 +192,33 @@ async def lifespan(app: FastAPI):
         else None
     )
 
+    # --- WMO Alerts subsystem ---
+    alerts_store = None
+    alerts_fetcher = None
+    if settings.alerts_enabled:
+        alerts_cache = Path(settings.cache_dir) if settings.cache_dir else None
+        if alerts_cache is None and settings.alerts_cache_dir:
+            alerts_cache = Path(settings.alerts_cache_dir)
+
+        alerts_store = AlertsStore()
+        alerts_fetcher = WMOAlertsFetcher(
+            store=alerts_store,
+            cache_dir=str(alerts_cache) if alerts_cache else None,
+            interval=settings.alerts_fetch_interval,
+            concurrency=settings.alerts_concurrency,
+        )
+        routes.alerts_store = alerts_store
+        routes.alerts_fetcher = alerts_fetcher
+        routes.alerts_enabled = True
+        await alerts_fetcher.start()
+        logger.info(
+            "Alerts: WMO ingest started (interval=%ds)",
+            settings.alerts_fetch_interval,
+        )
+    else:
+        routes.alerts_enabled = False
+        logger.info("Alerts: disabled (LIBREWXR_ALERTS_ENABLED=false)")
+
     # Wire up the shared state
     routes.frame_store = store
     routes.tile_cache = cache
@@ -239,7 +270,7 @@ async def lifespan(app: FastAPI):
     logger.info(
         "Starting LibreWXR (public_url=%s, max_zoom=%d, regions=%s, "
         "tile_cache=%d MB, memory_limit=%d MB, nowcast=%s, satellite=%s, "
-        "cache_dir=%s)",
+        "alerts=%s, cache_dir=%s)",
         settings.public_url,
         settings.max_zoom,
         ", ".join(enabled),
@@ -247,6 +278,7 @@ async def lifespan(app: FastAPI):
         mem_limit,
         f"{settings.nowcast_frames} frames" if settings.nowcast_enabled else "off",
         f"{settings.satellite_max_frames} frames" if settings.satellite_enabled else "off",
+        "enabled" if settings.alerts_enabled else "off",
         settings.cache_dir or "(none)",
     )
     await fetcher.start()
@@ -272,6 +304,8 @@ async def lifespan(app: FastAPI):
 
     await monitor.stop()
     await fetcher.stop()
+    if alerts_fetcher is not None:
+        await alerts_fetcher.close()
     warmer.shutdown()
     warmer_executor.shutdown(wait=False)
     request_executor.shutdown(wait=False)

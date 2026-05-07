@@ -1,6 +1,29 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (C) 2026 Joshua Kimsey
+from typing import Any
+
 from pydantic import BaseModel
+
+
+class AlertProperties(BaseModel):
+    title: str
+    severity: str
+    time: int | None
+    expires: int | None
+    description: str
+    regions: list[str]
+    uri: str
+
+
+class GeoJSONFeature(BaseModel):
+    type: str = "Feature"
+    properties: AlertProperties
+    geometry: dict[str, Any] | None
+
+
+class AlertsResponse(BaseModel):
+    type: str = "FeatureCollection"
+    features: list[GeoJSONFeature]
 
 
 class RadarTimestamp(BaseModel):
