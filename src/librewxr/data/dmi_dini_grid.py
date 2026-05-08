@@ -497,6 +497,29 @@ class DMIDiniGrid:
         if loaded:
             logger.info("DMI DINI: loaded %d cached frame(s) from disk", loaded)
 
+    def __getstate__(self) -> dict:
+        """Serialize state for cross-process reload (multi-worker mode).
+
+        The on-disk layout in ``_memmap_dir`` is the canonical state;
+        ``__setstate__`` rebuilds the in-memory frame dict by rescanning
+        disk via ``_load_cached_frames``.
+        """
+        return {
+            "memmap_dir": str(self._memmap_dir),
+            "latest_run_ts": self._latest_run_ts,
+            "frame_keys": [[run, lead] for (run, lead) in self._frames.keys()],
+        }
+
+    def __setstate__(self, state: dict) -> None:
+        """Restore state by rescanning ``memmap_dir`` from disk."""
+        self._memmap_dir = Path(state["memmap_dir"])
+        self._persistent = True
+        self._client = None
+        self._fetch_lock = asyncio.Lock()
+        self._frames = {}
+        self._latest_run_ts = None
+        self._load_cached_frames()
+
     @property
     def data_bytes(self) -> int:
         return sum(arr.nbytes for arr in self._frames.values())

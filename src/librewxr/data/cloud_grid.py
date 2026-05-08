@@ -46,18 +46,28 @@ class CloudGrid:
     Data attribution: ECMWF IFS, provided by Open-Meteo.com (CC-BY-4.0)
     """
 
-    def __init__(self):
+    def __init__(self, cache_dir: Path | None = None):
         self._timesteps: dict[int, tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
         self._sorted_timestamps: list[int] = []
         self._reference_time: str | None = None
         self._fs: fsspec.AbstractFileSystem | None = None
         self._cache = None  # CloudGridCache | None
+        # Resolved cache root used by ``__getstate__``/``__setstate__`` so
+        # cross-process reload knows where to find the on-disk satellite
+        # cache.  ``cache_dir`` takes precedence over ``settings.cache_dir``
+        # so the multi-worker pipeline can pass it explicitly.
+        resolved_cache_root = cache_dir or (
+            Path(settings.cache_dir) if settings.cache_dir else None
+        )
+        self._cache_root: Path | None = (
+            Path(resolved_cache_root) if resolved_cache_root else None
+        )
 
         # Initialize disk cache and eagerly load existing data
-        if settings.cache_dir:
+        if self._cache_root is not None:
             from librewxr.data.cloud_cache import CloudGridCache
 
-            self._cache = CloudGridCache(Path(settings.cache_dir))
+            self._cache = CloudGridCache(self._cache_root)
             ref_time, cached = self._cache.load_all()
             if cached:
                 self._timesteps = cached
@@ -370,6 +380,49 @@ class CloudGrid:
         col = np.clip(col, 0, GRID_WIDTH - 1)
 
         return high[row, col], mid[row, col], low[row, col]
+
+    def __getstate__(self) -> dict:
+        """Serialize state for cross-process reload (multi-worker mode).
+
+        CloudGrid is unique in that its on-disk layout is owned by the
+        ``CloudGridCache`` helper, which already does atomic writes and
+        an explicit metadata.json.  We just record ``cache_root`` and the
+        list of active timestamps; ``__setstate__`` re-memmaps everything.
+        """
+        return {
+            "cache_root": str(self._cache_root) if self._cache_root else None,
+            "reference_time": self._reference_time,
+            "timestamps": list(self._sorted_timestamps),
+        }
+
+    def __setstate__(self, state: dict) -> None:
+        """Restore state from the dict produced by ``__getstate__``.
+
+        Re-opens cached timesteps via ``CloudGridCache.read``.  Timestamps
+        whose backing file is missing on disk are dropped silently —
+        readers see whatever subset survived.
+        """
+        cache_root = state.get("cache_root")
+        self._cache_root = Path(cache_root) if cache_root else None
+        self._reference_time = state.get("reference_time")
+        self._fs = None
+        self._cache = None
+        self._timesteps = {}
+        self._sorted_timestamps = []
+
+        if self._cache_root is None:
+            return
+
+        from librewxr.data.cloud_cache import CloudGridCache
+
+        self._cache = CloudGridCache(self._cache_root)
+        new_timesteps: dict[int, tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
+        for ts in state.get("timestamps", []):
+            cached = self._cache.read(int(ts))
+            if cached is not None:
+                new_timesteps[int(ts)] = cached
+        self._timesteps = new_timesteps
+        self._sorted_timestamps = sorted(new_timesteps.keys())
 
     async def close(self) -> None:
         self._timesteps.clear()

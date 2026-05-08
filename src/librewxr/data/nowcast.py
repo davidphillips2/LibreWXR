@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import shutil
 import tempfile
 import time
@@ -69,21 +70,34 @@ class NowcastStore:
     memory-mapped temp files so the OS page cache manages physical RAM.
     """
 
-    def __init__(self):
+    def __init__(self, cache_dir: Path | None = None):
         self._frames: dict[int, NowcastFrame] = {}
         self._flows: dict[str, np.ndarray] = {}
         self._lock = asyncio.Lock()
-        self._memmap_dir = Path(tempfile.mkdtemp(prefix="librewxr_nowcast_"))
-        logger.info("Nowcast memmap directory: %s", self._memmap_dir)
+        if cache_dir is not None:
+            self._memmap_dir = Path(cache_dir) / "nowcast"
+            self._persistent = True
+        else:
+            self._memmap_dir = Path(tempfile.mkdtemp(prefix="librewxr_nowcast_"))
+            self._persistent = False
+        self._memmap_dir.mkdir(parents=True, exist_ok=True)
+        for path in self._memmap_dir.glob("*.tmp"):
+            path.unlink(missing_ok=True)
+        logger.info(
+            "Nowcast memmap directory: %s (persistent=%s)",
+            self._memmap_dir, self._persistent,
+        )
 
     def _to_memmap(self, name: str, data: np.ndarray) -> np.ndarray:
-        """Write array to disk and return a read-only memory-mapped view."""
-        path = self._memmap_dir / f"{name}.dat"
-        mm = np.memmap(path, dtype=data.dtype, mode="w+", shape=data.shape)
+        """Write array to disk atomically and return a read-only memory-mapped view."""
+        final = self._memmap_dir / f"{name}.dat"
+        tmp = final.with_suffix(".dat.tmp")
+        mm = np.memmap(tmp, dtype=data.dtype, mode="w+", shape=data.shape)
         mm[:] = data
         mm.flush()
         del mm
-        return np.memmap(path, dtype=data.dtype, mode="r", shape=data.shape)
+        os.replace(tmp, final)
+        return np.memmap(final, dtype=data.dtype, mode="r", shape=data.shape)
 
     async def replace_all(
         self, frames: list[NowcastFrame],
@@ -161,11 +175,76 @@ class NowcastStore:
         self._frames.clear()
         self._flows.clear()
 
+    def __getstate__(self) -> dict:
+        """Serialize state for cross-process reload (multi-worker mode)."""
+        frames_state: list[dict] = []
+        for ts, frame in self._frames.items():
+            regions: dict[str, list] = {}
+            for name, arr in frame.regions.items():
+                regions[name] = [
+                    os.path.basename(str(arr.filename)),
+                    arr.dtype.str,
+                    list(arr.shape),
+                ]
+            frames_state.append({
+                "timestamp": ts,
+                "blend_weight": frame.blend_weight,
+                "regions": regions,
+            })
+        flows_state: dict[str, list] = {}
+        for name, arr in self._flows.items():
+            flows_state[name] = [
+                os.path.basename(str(arr.filename)),
+                arr.dtype.str,
+                list(arr.shape),
+            ]
+        return {
+            "memmap_dir": str(self._memmap_dir),
+            "frames": frames_state,
+            "flows": flows_state,
+        }
+
+    def __setstate__(self, state: dict) -> None:
+        """Restore state from the dict produced by ``__getstate__``."""
+        memmap_dir = Path(state["memmap_dir"])
+        new_frames: dict[int, NowcastFrame] = {}
+        for f_info in state["frames"]:
+            ts = int(f_info["timestamp"])
+            frame = NowcastFrame(
+                timestamp=ts,
+                blend_weight=float(f_info["blend_weight"]),
+            )
+            for name, (basename, dtype_str, shape) in f_info["regions"].items():
+                frame.regions[name] = np.memmap(
+                    memmap_dir / basename,
+                    dtype=np.dtype(dtype_str), mode="r",
+                    shape=tuple(shape),
+                )
+            new_frames[ts] = frame
+
+        new_flows: dict[str, np.ndarray] = {}
+        for name, (basename, dtype_str, shape) in state["flows"].items():
+            new_flows[name] = np.memmap(
+                memmap_dir / basename,
+                dtype=np.dtype(dtype_str), mode="r",
+                shape=tuple(shape),
+            )
+
+        self._memmap_dir = memmap_dir
+        self._frames = new_frames
+        self._flows = new_flows
+        self._persistent = True
+        if not hasattr(self, "_lock"):
+            self._lock = asyncio.Lock()
+
     def cleanup(self) -> None:
-        """Clear data and remove the memmap temp directory."""
+        """Clear data; remove the memmap dir only when non-persistent."""
         self.clear()
-        shutil.rmtree(self._memmap_dir, ignore_errors=True)
-        logger.info("Nowcast memmap directory cleaned up")
+        if self._persistent:
+            logger.info("Nowcast memmaps retained on disk at %s", self._memmap_dir)
+        else:
+            shutil.rmtree(self._memmap_dir, ignore_errors=True)
+            logger.info("Nowcast memmap directory cleaned up")
 
 
 # ---------------------------------------------------------------------------

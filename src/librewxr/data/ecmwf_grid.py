@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+import os
 import shutil
 import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -57,28 +58,54 @@ class ECMWFGrid:
 
     name = "ecmwf_ifs"
 
-    def __init__(self):
+    def __init__(self, cache_dir: Path | None = None):
         # dict mapping Unix timestamp -> (precip_dbz uint8, snow_mask bool)
         self._timesteps: dict[int, tuple[np.ndarray, np.ndarray]] = {}
         self._sorted_timestamps: list[int] = []
         self._reference_time: str | None = None
         self._fs: fsspec.AbstractFileSystem | None = None
         self._flow: np.ndarray | None = None  # Global optical flow field
-        self._memmap_dir = Path(tempfile.mkdtemp(prefix="librewxr_ecmwf_"))
-        logger.info("ECMWF memmap directory: %s", self._memmap_dir)
+        if cache_dir is not None:
+            self._memmap_dir = Path(cache_dir) / "ecmwf_ifs"
+            self._persistent = True
+        else:
+            self._memmap_dir = Path(tempfile.mkdtemp(prefix="librewxr_ecmwf_"))
+            self._persistent = False
+        self._memmap_dir.mkdir(parents=True, exist_ok=True)
+        # Drop stale .tmp files from a crash mid-write.
+        for path in self._memmap_dir.glob("*.tmp"):
+            path.unlink(missing_ok=True)
+        logger.info(
+            "ECMWF memmap directory: %s (persistent=%s)",
+            self._memmap_dir, self._persistent,
+        )
 
     def _to_memmap(self, name: str, data: np.ndarray) -> np.ndarray:
-        """Write array to disk and return a read-only memory-mapped view."""
-        path = self._memmap_dir / f"{name}.dat"
-        mm = np.memmap(path, dtype=data.dtype, mode="w+", shape=data.shape)
+        """Write array to disk atomically and return a read-only memory-mapped view.
+
+        Atomic write (.tmp → os.replace) ensures readers in other processes
+        never see a half-written file — required for multi-worker safety.
+        """
+        final = self._memmap_dir / f"{name}.dat"
+        tmp = final.with_suffix(".dat.tmp")
+        mm = np.memmap(tmp, dtype=data.dtype, mode="w+", shape=data.shape)
         mm[:] = data
         mm.flush()
         del mm
-        return np.memmap(path, dtype=data.dtype, mode="r", shape=data.shape)
+        os.replace(tmp, final)
+        return np.memmap(final, dtype=data.dtype, mode="r", shape=data.shape)
 
-    def _cleanup_memmap_files(self) -> None:
-        """Delete all memmap files from the previous cycle."""
+    def _cleanup_memmap_files(self, keep: set[str] | None = None) -> None:
+        """Delete memmap files except those listed in ``keep``.
+
+        ``keep`` should be a set of file basenames (e.g. ``{"1712340000_precip.dat"}``)
+        that the caller still references.  Anything else under the directory
+        is removed.  When ``keep`` is None, every ``.dat`` file is deleted
+        (legacy behavior used at shutdown).
+        """
         for path in self._memmap_dir.glob("*.dat"):
+            if keep is not None and path.name in keep:
+                continue
             try:
                 path.unlink()
             except OSError:
@@ -549,10 +576,93 @@ class ECMWFGrid:
         """True if any timestep is loaded."""
         return bool(self._sorted_timestamps)
 
+    def __getstate__(self) -> dict:
+        """Serialize state for cross-process reload (multi-worker mode).
+
+        Stores file basenames relative to ``memmap_dir`` so the snapshot
+        is portable across processes that share the cache volume.
+        """
+        timesteps_state: dict[str, dict] = {}
+        for ts, (precip, snow) in self._timesteps.items():
+            timesteps_state[str(ts)] = {
+                "precip": [
+                    os.path.basename(str(precip.filename)),
+                    precip.dtype.str,
+                    list(precip.shape),
+                ],
+                "snow": [
+                    os.path.basename(str(snow.filename)),
+                    snow.dtype.str,
+                    list(snow.shape),
+                ],
+            }
+        flow_state = None
+        if self._flow is not None:
+            flow_state = [
+                os.path.basename(str(self._flow.filename)),
+                self._flow.dtype.str,
+                list(self._flow.shape),
+            ]
+        return {
+            "memmap_dir": str(self._memmap_dir),
+            "reference_time": self._reference_time,
+            "timesteps": timesteps_state,
+            "flow": flow_state,
+        }
+
+    def __setstate__(self, state: dict) -> None:
+        """Restore state from the dict produced by ``__getstate__``.
+
+        Re-opens all memmap files read-only.  Replaces internal state
+        atomically so a concurrent reader sees either the old or new
+        snapshot — never a mix.
+        """
+        memmap_dir = Path(state["memmap_dir"])
+        new_timesteps: dict[int, tuple[np.ndarray, np.ndarray]] = {}
+        for ts_str, fields in state["timesteps"].items():
+            precip_basename, precip_dtype, precip_shape = fields["precip"]
+            snow_basename, snow_dtype, snow_shape = fields["snow"]
+            precip = np.memmap(
+                memmap_dir / precip_basename,
+                dtype=np.dtype(precip_dtype), mode="r",
+                shape=tuple(precip_shape),
+            )
+            snow = np.memmap(
+                memmap_dir / snow_basename,
+                dtype=np.dtype(snow_dtype), mode="r",
+                shape=tuple(snow_shape),
+            )
+            new_timesteps[int(ts_str)] = (precip, snow)
+
+        new_flow = None
+        if state["flow"] is not None:
+            flow_basename, flow_dtype, flow_shape = state["flow"]
+            new_flow = np.memmap(
+                memmap_dir / flow_basename,
+                dtype=np.dtype(flow_dtype), mode="r",
+                shape=tuple(flow_shape),
+            )
+
+        self._memmap_dir = memmap_dir
+        self._timesteps = new_timesteps
+        self._sorted_timestamps = sorted(new_timesteps.keys())
+        self._reference_time = state["reference_time"]
+        self._flow = new_flow
+        self._fs = None  # lazily recreated if needed
+        self._persistent = True
+
     async def close(self) -> None:
-        """Clean up resources and remove memmap temp directory."""
+        """Clean up resources.
+
+        In persistent mode, on-disk memmap files are kept so a fresh
+        process can re-open them via __setstate__.  Non-persistent mode
+        wipes the temp directory like before.
+        """
         self._timesteps.clear()
         self._flow = None
         self._fs = None
-        shutil.rmtree(self._memmap_dir, ignore_errors=True)
-        logger.info("ECMWF memmap directory cleaned up")
+        if self._persistent:
+            logger.info("ECMWF memmaps retained on disk at %s", self._memmap_dir)
+        else:
+            shutil.rmtree(self._memmap_dir, ignore_errors=True)
+            logger.info("ECMWF memmap directory cleaned up")
