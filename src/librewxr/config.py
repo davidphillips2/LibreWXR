@@ -47,6 +47,12 @@ class Settings(BaseSettings):
     ecmwf_snow_ratio_threshold: float = 0.5
     ecmwf_max_timesteps: int = 0  # 0 = auto (derived from max_frames)
     ecmwf_interpolation: bool = True  # Optical flow interpolation of IFS hourly data to 10-min frames
+    # Disable IFS entirely (skip the global precipitation fallback).  Useful
+    # for isolating regional NWP layers during debugging — anywhere outside
+    # the regional models will simply show zero precipitation.  Default
+    # leaves IFS on; turn off only when you specifically want to see what
+    # a regional model contributes on its own.
+    ecmwf_enabled: bool = True
     # North American NWP source for the chain. "ifs" uses ECMWF IFS as the
     # only source (current behavior). "hrrr" prepends NOAA HRRR-subh as the
     # CONUS-priority source, falling back to IFS outside HRRR's domain.
@@ -89,6 +95,20 @@ class Settings(BaseSettings):
     # Same Marshall-Palmer caveat as ICON-EU.  HARMONIE has no native
     # composite reflectivity output so we derive dBZ from accumulated tp.
     dmi_dini_dbz_offset: float = 6.0
+    # ECCC HRDPS continental: 2.5 km native rotated lat/lon, 4 cycles/day
+    # (00/06/12/18 UTC), 48 h horizon, 1-hour APCP accumulation.  Anonymous
+    # HTTPS via dd.weather.gc.ca — no auth, no API key.  Independent toggle
+    # from na_nwp_source: HRDPS covers Canada + the northern fringe of
+    # CONUS, disjoint enough from HRRR's CONUS focus to layer cleanly
+    # (HRRR first inside CONUS where it's denser; HRDPS second to fill
+    # Canada).  The base URL is the dd.weather.gc.ca root — the URL
+    # builder appends the date-prefixed archive path so we can fetch
+    # runs from yesterday across midnight UTC without the ``/today/``
+    # tree rolling out from under us.
+    hrdps_enabled: bool = False
+    hrdps_base_url: str = "https://dd.weather.gc.ca"
+    hrdps_publish_delay_minutes: int = 240   # ~3.5-4 h after init; 4 h conservative
+    hrdps_dbz_offset: float = 6.0            # same Marshall-Palmer caveat as DINI/ICON-EU
     nowcast_enabled: bool = True  # Generate precipitation nowcast via radar extrapolation + IFS
     nowcast_frames: int = 6  # Number of 10-min forecast frames (6 = 60 min)
     nowcast_blend_mode: str = "radar"  # "radar", "blended", or "model"

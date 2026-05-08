@@ -20,6 +20,7 @@ from librewxr.data.coverage import build_coverage_masks, build_feather_masks
 from librewxr.data.dmi_dini_grid import DMIDiniGrid
 from librewxr.data.ecmwf_grid import ECMWFGrid
 from librewxr.data.fetcher import RadarFetcher
+from librewxr.data.hrdps_grid import HRDPSGrid
 from librewxr.data.hrrr_grid import HRRRGrid
 from librewxr.data.icon_eu_grid import ICONEUGrid
 from librewxr.data.nowcast import NowcastGenerator, NowcastStore
@@ -56,6 +57,7 @@ _LOG_TAGS = {
     "librewxr.data.hrrr_grid": "hrrr",
     "librewxr.data.icon_eu_grid": "icon-eu",
     "librewxr.data.dmi_dini_grid": "dmi-dini",
+    "librewxr.data.hrdps_grid": "hrdps",
     "librewxr.data.cloud_grid": "cloud",
     "librewxr.data.cloud_cache": "cloud",
     "librewxr.data.nowcast": "nowcast",
@@ -100,7 +102,7 @@ def _clear_coord_caches() -> None:
 async def lifespan(app: FastAPI):
     store = FrameStore(max_frames=settings.max_frames)
     cache = TileCache(max_mb=settings.tile_cache_mb)
-    ecmwf_grid = ECMWFGrid()
+    ecmwf_grid = ECMWFGrid() if settings.ecmwf_enabled else None
     from pathlib import Path
     nwp_cache_dir = Path(settings.cache_dir) if settings.cache_dir else None
     if settings.na_nwp_source == "hrrr":
@@ -119,17 +121,29 @@ async def lifespan(app: FastAPI):
         dmi_dini_grid = DMIDiniGrid(cache_dir=nwp_cache_dir)
     else:
         dmi_dini_grid = None
+    # HRDPS is independent of na_nwp_source: HRRR's CONUS focus and
+    # HRDPS's Canadian focus are disjoint enough that running both
+    # together is the common case — HRRR wins where it's denser inside
+    # CONUS, HRDPS fills Canada / northern fringe / the Atlantic.
+    if settings.hrdps_enabled:
+        hrdps_grid = HRDPSGrid(cache_dir=nwp_cache_dir)
+    else:
+        hrdps_grid = None
     # Chain order = specificity (narrowest domain first), so HRRR fills
-    # CONUS, DMI DINI fills NW + central Europe at 2 km, ICON-EU fills
-    # the rest of Europe at 7 km, IFS catches everything else globally.
+    # CONUS, HRDPS fills Canada, DMI DINI fills NW + central Europe at
+    # 2 km, ICON-EU fills the rest of Europe at 7 km, IFS catches
+    # everything else globally.
     chain_sources = []
     if hrrr_grid:
         chain_sources.append(hrrr_grid)
+    if hrdps_grid:
+        chain_sources.append(hrdps_grid)
     if dmi_dini_grid:
         chain_sources.append(dmi_dini_grid)
     if icon_eu_grid:
         chain_sources.append(icon_eu_grid)
-    chain_sources.append(ecmwf_grid)
+    if ecmwf_grid is not None:
+        chain_sources.append(ecmwf_grid)
     nwp_chain = NWPChain(chain_sources)
     logger.info("NWP chain: [%s]", ", ".join(s.name for s in nwp_chain.sources))
     cloud = CloudGrid() if settings.satellite_enabled else None
@@ -224,6 +238,7 @@ async def lifespan(app: FastAPI):
     routes.tile_cache = cache
     routes.ecmwf_grid = ecmwf_grid
     routes.hrrr_grid = hrrr_grid
+    routes.hrdps_grid = hrdps_grid
     routes.icon_eu_grid = icon_eu_grid
     routes.dmi_dini_grid = dmi_dini_grid
     routes.nwp_chain = nwp_chain
@@ -258,6 +273,7 @@ async def lifespan(app: FastAPI):
         store, cache,
         ecmwf_grid=ecmwf_grid,
         hrrr_grid=hrrr_grid,
+        hrdps_grid=hrdps_grid,
         icon_eu_grid=icon_eu_grid,
         dmi_dini_grid=dmi_dini_grid,
         cloud_grid=cloud,
