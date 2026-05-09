@@ -182,6 +182,7 @@ def _build_fetcher(store, tile_cache, radar_cache, region):
     fetcher._cacomp_msc_source = None
     fetcher._iem_fallback = None
     fetcher._cacomp_msc_available = None
+    fetcher._on_cycle_complete = None
     return fetcher, source
 
 
@@ -256,3 +257,77 @@ class TestFetcherRadarCacheWiring:
 
         await fetcher._fetch_timestamps([(1000, "live", 0)])
         assert await store.get_timestamps() == [1000]
+
+
+class TestOnCycleCompleteHook:
+    @pytest.fixture
+    def small_region(self):
+        return RegionDef(
+            name="TESTREG",
+            west=0.0, east=3.2, south=0.0, north=3.2,
+            pixel_size=0.1, group="US",
+            grid_width=32, grid_height=32,
+        )
+
+    @pytest.mark.asyncio
+    async def test_async_hook_runs_after_each_cycle(self, small_region):
+        store = FrameStore(max_frames=4)
+        tile_cache = TileCache(max_mb=1)
+        fetcher, _src = _build_fetcher(store, tile_cache, None, small_region)
+
+        calls = 0
+
+        async def hook():
+            nonlocal calls
+            calls += 1
+
+        fetcher._on_cycle_complete = hook
+        await fetcher._fire_cycle_complete()
+        await fetcher._fire_cycle_complete()
+        assert calls == 2
+
+    @pytest.mark.asyncio
+    async def test_sync_hook_supported(self, small_region):
+        store = FrameStore(max_frames=4)
+        tile_cache = TileCache(max_mb=1)
+        fetcher, _src = _build_fetcher(store, tile_cache, None, small_region)
+
+        calls = 0
+
+        def hook():
+            nonlocal calls
+            calls += 1
+
+        fetcher._on_cycle_complete = hook
+        await fetcher._fire_cycle_complete()
+        assert calls == 1
+
+    @pytest.mark.asyncio
+    async def test_hook_failure_does_not_propagate(self, small_region):
+        # A failed snapshot dump must never kill the fetcher loop.
+        store = FrameStore(max_frames=4)
+        tile_cache = TileCache(max_mb=1)
+        fetcher, _src = _build_fetcher(store, tile_cache, None, small_region)
+
+        async def hook():
+            raise RuntimeError("disk full")
+
+        fetcher._on_cycle_complete = hook
+        await fetcher._fire_cycle_complete()  # should not raise
+
+    @pytest.mark.asyncio
+    async def test_no_hook_is_silent(self, small_region):
+        store = FrameStore(max_frames=4)
+        tile_cache = TileCache(max_mb=1)
+        fetcher, _src = _build_fetcher(store, tile_cache, None, small_region)
+        assert fetcher._on_cycle_complete is None
+        await fetcher._fire_cycle_complete()  # should not raise
+
+    @pytest.mark.asyncio
+    async def test_constructor_accepts_hook_kwarg(self):
+        # Smoke check that the public constructor accepts on_cycle_complete.
+        # We bypass __init__ for the body of the test, but verify the
+        # signature includes the kwarg so future refactors don't drop it.
+        import inspect as _inspect
+        sig = _inspect.signature(RadarFetcher.__init__)
+        assert "on_cycle_complete" in sig.parameters

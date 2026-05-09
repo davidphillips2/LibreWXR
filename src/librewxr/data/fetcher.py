@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (C) 2026 Joshua Kimsey
 import asyncio
+import inspect
 import logging
 import time
+from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
 
 import numpy as np
@@ -57,6 +59,7 @@ class RadarFetcher:
         nowcast_generator=None,
         warmer=None,
         radar_cache=None,
+        on_cycle_complete: Callable[[], Awaitable[None] | None] | None = None,
     ):
         self._store = store
         self._cache = cache
@@ -72,6 +75,7 @@ class RadarFetcher:
         self._nowcast_generator = nowcast_generator
         self._warmer = warmer
         self._radar_cache = radar_cache
+        self._on_cycle_complete = on_cycle_complete
         self._task: asyncio.Task | None = None
         self._cloud_task: asyncio.Task | None = None
         self._enabled_regions = [
@@ -200,6 +204,7 @@ class RadarFetcher:
         try:
             await self._fetch_all_frames()
             await self._run_nowcast()
+            await self._fire_cycle_complete()
             if self._warmer is not None and settings.warm_overview_zoom >= 0:
                 await self._warmer.warm_latest()
             self._schedule_warm()
@@ -215,10 +220,27 @@ class RadarFetcher:
             try:
                 await self._fetch_all_frames()
                 await self._run_nowcast()
+                await self._fire_cycle_complete()
                 self._schedule_warm()
             except Exception:
                 logger.exception("Error in fetch loop")
             release_memory()
+
+    async def _fire_cycle_complete(self) -> None:
+        """Invoke the on_cycle_complete hook if set; never propagate failure.
+
+        The data-pipeline process uses this to dump a cross-process state
+        snapshot.  A failed dump must never kill the fetcher loop — render
+        workers will simply read the previous snapshot.
+        """
+        if self._on_cycle_complete is None:
+            return
+        try:
+            result = self._on_cycle_complete()
+            if inspect.isawaitable(result):
+                await result
+        except Exception:
+            logger.exception("on_cycle_complete hook failed")
 
     def _schedule_warm(self) -> None:
         """Re-trigger overview warming for any previously-requested categories.
