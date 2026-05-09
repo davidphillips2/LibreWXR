@@ -193,6 +193,12 @@ async def run_pipeline() -> None:
             len(restored), restored[0].timestamp, restored[-1].timestamp,
         )
 
+    # AlertsStore is constructed up-front (even before the fetcher starts)
+    # so it can ride along in the master_state snapshot.  The render-only
+    # workers don't run their own alerts ingest — they read this store
+    # via apply_state instead.
+    alerts_store = AlertsStore() if settings.alerts_enabled else None
+
     # Stores keyed by the same names master_state expects.  None entries
     # are skipped by dump_state.
     stores = {
@@ -207,6 +213,7 @@ async def run_pipeline() -> None:
         "dmi_dini_grid": dmi_dini_grid,
         "cloud_grid": cloud_grid,
         "nowcast_store": nowcast_store,
+        "alerts_store": alerts_store,
     }
 
     async def on_cycle_complete() -> None:
@@ -232,14 +239,12 @@ async def run_pipeline() -> None:
         on_cycle_complete=on_cycle_complete,
     )
 
-    alerts_store = None
     alerts_fetcher = None
-    if settings.alerts_enabled:
+    if alerts_store is not None:
         alerts_cache = (
             cache_dir if settings.cache_dir
             else (Path(settings.alerts_cache_dir) if settings.alerts_cache_dir else None)
         )
-        alerts_store = AlertsStore()
         alerts_fetcher = WMOAlertsFetcher(
             store=alerts_store,
             cache_dir=str(alerts_cache) if alerts_cache else None,

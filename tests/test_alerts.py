@@ -278,6 +278,68 @@ class TestAlertsEndpoint:
 
 
 @pytest.mark.alerts
+class TestAlertsStoreSnapshot:
+    """Round-trip __getstate__ / __setstate__ via the multi-worker mechanism.
+
+    The pipeline owns the WMO ingest; render-only workers see alerts only
+    via the master_state snapshot.  Polygon serialisation goes through
+    GeoJSON since shapely objects don't survive JSON round-trips natively.
+    """
+
+    def test_round_trip_preserves_alerts(self):
+        producer = AlertsStore()
+        poly = Polygon([(-105, 40), (-105, 41), (-104, 41), (-104, 40), (-105, 40)])
+        producer.replace_all([
+            AlertEntry(
+                source_id="test-1",
+                event="Severe Thunderstorm Warning",
+                description="Hail to 1.5 inches",
+                severity="Severe",
+                effective="2026-05-08T20:00:00Z",
+                expires="2026-05-08T21:00:00Z",
+                area_desc="Boulder County",
+                url="https://example.com/alerts/1",
+                polygon=poly,
+            ),
+            AlertEntry(
+                source_id="test-2",
+                event="Flood Watch",
+                description="Heavy rain expected",
+                severity="Moderate",
+                effective="2026-05-08T20:00:00Z",
+                expires="2026-05-09T08:00:00Z",
+                area_desc="Eastern Plains",
+                url="https://example.com/alerts/2",
+                polygon=None,  # alerts without geometry should round-trip too
+            ),
+        ])
+
+        # JSON-roundtrip the snapshot to mirror what dump_state/load_state do.
+        snapshot = json.loads(json.dumps(producer.__getstate__()))
+
+        consumer = AlertsStore()
+        consumer.__setstate__(snapshot)
+
+        restored = consumer.alerts
+        assert len(restored) == 2
+        assert restored[0].event == "Severe Thunderstorm Warning"
+        assert restored[0].polygon is not None
+        # Polygon equality via centroid + area is enough — exact coord
+        # ordering after GeoJSON round-trip can differ trivially.
+        assert restored[0].polygon.equals(poly)
+        assert restored[1].polygon is None
+        assert consumer.fetch_success is True
+        assert consumer.last_updated == producer.last_updated
+
+    def test_empty_store_round_trips(self):
+        producer = AlertsStore()
+        snapshot = json.loads(json.dumps(producer.__getstate__()))
+        consumer = AlertsStore()
+        consumer.__setstate__(snapshot)
+        assert consumer.alerts == []
+        assert consumer.fetch_success is False
+
+
 class TestCAPParsing:
     def test_parse_cap_time(self):
         assert _parse_cap_time("2026-05-07T00:15:00-05:00") is not None

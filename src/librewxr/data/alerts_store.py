@@ -6,7 +6,7 @@ import time
 from dataclasses import dataclass
 from typing import Optional
 
-from shapely.geometry import Polygon
+from shapely.geometry import Polygon, shape
 
 
 @dataclass
@@ -56,3 +56,55 @@ class AlertsStore:
     def fetch_success(self) -> bool:
         with self._lock:
             return self._fetch_success
+
+    def __getstate__(self) -> dict:
+        """Serialize state for the multi-worker snapshot.
+
+        Polygons are emitted as GeoJSON via shapely's ``__geo_interface__``
+        so the whole payload is JSON-friendly.  Render-only workers
+        rebuild Polygon objects in ``__setstate__``.
+        """
+        with self._lock:
+            return {
+                "last_updated": self.last_updated,
+                "fetch_success": self._fetch_success,
+                "alerts": [
+                    {
+                        "source_id": a.source_id,
+                        "event": a.event,
+                        "description": a.description,
+                        "severity": a.severity,
+                        "effective": a.effective,
+                        "expires": a.expires,
+                        "area_desc": a.area_desc,
+                        "url": a.url,
+                        "polygon": (
+                            a.polygon.__geo_interface__ if a.polygon is not None else None
+                        ),
+                    }
+                    for a in self._alerts
+                ],
+            }
+
+    def __setstate__(self, state: dict) -> None:
+        """Restore from a snapshot written by ``__getstate__``."""
+        if not hasattr(self, "_lock"):
+            # __setstate__ may run before __init__ (pickle compat).
+            self._lock = threading.RLock()
+        with self._lock:
+            self._alerts = [
+                AlertEntry(
+                    source_id=a["source_id"],
+                    event=a["event"],
+                    description=a["description"],
+                    severity=a["severity"],
+                    effective=a["effective"],
+                    expires=a["expires"],
+                    area_desc=a["area_desc"],
+                    url=a["url"],
+                    polygon=shape(a["polygon"]) if a.get("polygon") else None,
+                )
+                for a in state.get("alerts", [])
+            ]
+            self.last_updated = state.get("last_updated", 0.0)
+            self._fetch_success = state.get("fetch_success", False)

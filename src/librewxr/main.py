@@ -179,6 +179,7 @@ async def _render_only_lifespan(app: FastAPI):
     dmi_dini_grid = DMIDiniGrid(cache_dir=cache_dir)
     cloud_grid = CloudGrid(cache_dir=cache_dir) if settings.satellite_enabled else None
     nowcast_store = NowcastStore(cache_dir=cache_dir) if settings.nowcast_enabled else None
+    alerts_store = AlertsStore() if settings.alerts_enabled else None
 
     stores = {
         "frame_store": store,
@@ -192,6 +193,7 @@ async def _render_only_lifespan(app: FastAPI):
         "dmi_dini_grid": dmi_dini_grid,
         "cloud_grid": cloud_grid,
         "nowcast_store": nowcast_store,
+        "alerts_store": alerts_store,
     }
 
     payload = load_state(cache_dir)
@@ -222,6 +224,7 @@ async def _render_only_lifespan(app: FastAPI):
     dmi_dini_grid = stores["dmi_dini_grid"]
     cloud_grid = stores["cloud_grid"]
     nowcast_store = stores["nowcast_store"]
+    alerts_store = stores["alerts_store"]
 
     enabled = settings.get_enabled_regions()
     coverage_overrides = (
@@ -284,7 +287,13 @@ async def _render_only_lifespan(app: FastAPI):
     routes.enabled_regions = enabled
     routes.radar_cache = None
     routes.radar_fetcher = None
-    routes.alerts_enabled = False  # alerts ride the pipeline; render-only is read-only
+    # Alerts ride the master_state snapshot — pipeline owns the WMO ingest,
+    # render workers just read alerts_store via apply_state.  alerts_fetcher
+    # stays None here (no duplicate fetching), and alerts_enabled tracks
+    # whether the snapshot actually included an alerts_store entry.
+    routes.alerts_store = alerts_store
+    routes.alerts_fetcher = None
+    routes.alerts_enabled = alerts_store is not None
 
     last_mtime = state_mtime(cache_dir)
     poller_stop = asyncio.Event()
