@@ -172,6 +172,12 @@ class Settings(BaseSettings):
     tile_tracking_min_zoom: int = 7  # Track only z >= this (overview zooms are pre-warmed anyway)
     tile_tracking_max_entries: int = 10_000  # Cap per-tile counters; halves when full
     download_retries: int = 1  # Retries on transient download errors (0 = no retry, 1 = one retry)
+    # Maximum number of NWP auxiliary-grid fetches running in parallel
+    # inside one fetch cycle.  Each grid loads tens-to-hundreds of MB
+    # during decode, so the cap bounds peak RAM at ~N × per-grid working
+    # set.  4 fits comfortably in 8 GB; bump higher for fatter rigs to
+    # bring fetch-cycle wall time closer to the slowest single source.
+    nwp_fetch_concurrency: int = 4
     cors_origins: list[str] = ["*"]
 
     def get_ecmwf_max_timesteps(self) -> int:

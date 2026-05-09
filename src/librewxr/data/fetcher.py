@@ -286,128 +286,92 @@ class RadarFetcher:
                 logger.exception("Nowcast generation failed")
 
     async def _fetch_auxiliary_grids(self) -> None:
-        """Fetch ECMWF IFS precipitation grid and kick off background cloud fetch."""
+        """Fetch every enabled NWP grid and kick off background cloud fetch.
+
+        NWP grids hit independent S3 / HTTPS endpoints with no shared
+        state, so they fan out under a small semaphore (sized by
+        ``settings.nwp_fetch_concurrency``).  Wall-clock time drops from
+        ``sum(fetch_i)`` to roughly ``max(fetch_i)`` × ceil(N / cap),
+        bounded by the slowest single source.  The cap keeps peak RAM
+        sane — each grid holds tens-to-hundreds of MB during decode.
+
+        Cloud stays detached: it can take 40 s+ per ``.om`` file and we
+        don't want to gate the radar cycle on it.
+        """
+        nwp_horizon = settings.nowcast_frames * settings.fetch_interval
+        nwp_history = settings.max_frames * settings.fetch_interval
+
+        # (label, grid, kwargs, failure-message) tuples.  Each entry runs
+        # under the semaphore independently, so a slow source never holds
+        # back another finishing.
+        grid_specs: list[tuple[str, object, dict, str]] = []
         if self._ecmwf_grid is not None:
-            try:
-                await self._ecmwf_grid.fetch()
-            except Exception:
-                logger.warning("ECMWF IFS fetch failed, global fallback may be stale")
-
-        # HRRR refreshes per cycle.  Idempotent: it skips frames already
-        # in the store so this is cheap once a run is fully ingested.
-        # The history window matches the radar buffer (max_frames *
-        # fetch_interval) so every displayed past frame uses HRRR for
-        # its out-of-radar-coverage pixels — no IFS↔HRRR seam between
-        # past and present frames.  HRRRGrid.fetch() walks back through
-        # multiple hourly runs as needed because each run only forecasts
-        # forward from its init time.
+            grid_specs.append((
+                "ECMWF IFS", self._ecmwf_grid, {},
+                "ECMWF IFS fetch failed, global fallback may be stale",
+            ))
         if self._hrrr_grid is not None:
-            try:
-                horizon = settings.nowcast_frames * settings.fetch_interval
-                history = settings.max_frames * settings.fetch_interval
-                await self._hrrr_grid.fetch(
-                    history_seconds=history,
-                    horizon_seconds=horizon,
-                )
-            except Exception:
-                logger.warning("HRRR fetch failed, CONUS NWP layer may be stale")
-
-        # HRRR-Alaska is independent of HRRR-CONUS — same model, disjoint
-        # domain (the HRRR-Alaska polar-stereo grid covers Alaska + the
-        # Aleutian arc, the Bering, and parts of the Yukon and N. Pacific
-        # that HRRR-CONUS' LCC grid never reached).
+            grid_specs.append((
+                "HRRR", self._hrrr_grid,
+                {"history_seconds": nwp_history, "horizon_seconds": nwp_horizon},
+                "HRRR fetch failed, CONUS NWP layer may be stale",
+            ))
         if self._hrrr_alaska_grid is not None:
-            try:
-                horizon = settings.nowcast_frames * settings.fetch_interval
-                history = settings.max_frames * settings.fetch_interval
-                await self._hrrr_alaska_grid.fetch(
-                    history_seconds=history,
-                    horizon_seconds=horizon,
-                )
-            except Exception:
-                logger.warning(
-                    "HRRR-Alaska fetch failed, AK NWP layer may be stale"
-                )
-
-        # HRDPS follows the same pattern as HRRR — independent regional
-        # NWP layered on top of IFS.  Walks back through 6-hourly ECCC
-        # cycles (HRDPS publishes 4 runs/day) to cover the active
-        # history+horizon window.  Sits behind HRRR in the chain because
-        # HRRR is denser inside CONUS; HRDPS fills Canada and the
-        # northern fringe wherever HRRR's domain doesn't reach.
+            grid_specs.append((
+                "HRRR-Alaska", self._hrrr_alaska_grid,
+                {"history_seconds": nwp_history, "horizon_seconds": nwp_horizon},
+                "HRRR-Alaska fetch failed, AK NWP layer may be stale",
+            ))
         if self._hrdps_grid is not None:
-            try:
-                horizon = settings.nowcast_frames * settings.fetch_interval
-                history = settings.max_frames * settings.fetch_interval
-                await self._hrdps_grid.fetch(
-                    history_seconds=history,
-                    horizon_seconds=horizon,
-                )
-            except Exception:
-                logger.warning("HRDPS fetch failed, Canada NWP layer may be stale")
-
-        # AROME Antilles follows the same pattern — independent regional
-        # NWP layered on top of IFS over the Caribbean.  Walks back
-        # through 6-hourly Météo-France cycles (4 runs/day) to cover the
-        # active history+horizon window.  Disjoint from every other
-        # regional source so position in the chain is fixed only relative
-        # to IFS (sits ahead).
+            grid_specs.append((
+                "HRDPS", self._hrdps_grid,
+                {"history_seconds": nwp_history, "horizon_seconds": nwp_horizon},
+                "HRDPS fetch failed, Canada NWP layer may be stale",
+            ))
         if self._arome_antilles_grid is not None:
-            try:
-                horizon = settings.nowcast_frames * settings.fetch_interval
-                history = settings.max_frames * settings.fetch_interval
-                await self._arome_antilles_grid.fetch(
-                    history_seconds=history,
-                    horizon_seconds=horizon,
-                )
-            except Exception:
-                logger.warning(
-                    "AROME Antilles fetch failed, Caribbean NWP layer may be stale"
-                )
-
-        # WRF-SMN follows the same pattern — independent regional NWP
-        # for the South American Cone.  6-hourly SMN cycles, 72 h
-        # horizon, NetCDF4 files (~34 MB each).  Sits ahead of IFS to
-        # win over the Argentine / Chilean / Uruguayan domain.
+            grid_specs.append((
+                "AROME Antilles", self._arome_antilles_grid,
+                {"history_seconds": nwp_history, "horizon_seconds": nwp_horizon},
+                "AROME Antilles fetch failed, Caribbean NWP layer may be stale",
+            ))
         if self._wrf_smn_grid is not None:
-            try:
-                horizon = settings.nowcast_frames * settings.fetch_interval
-                history = settings.max_frames * settings.fetch_interval
-                await self._wrf_smn_grid.fetch(
-                    history_seconds=history,
-                    horizon_seconds=horizon,
-                )
-            except Exception:
-                logger.warning(
-                    "WRF-SMN fetch failed, S. America NWP layer may be stale"
-                )
-
-        # ICON-EU follows the same pattern — same active window, walks
-        # back through 3-hourly DWD cycles instead of HRRR's hourly ones.
+            grid_specs.append((
+                "WRF-SMN", self._wrf_smn_grid,
+                {"history_seconds": nwp_history, "horizon_seconds": nwp_horizon},
+                "WRF-SMN fetch failed, S. America NWP layer may be stale",
+            ))
         if self._icon_eu_grid is not None:
-            try:
-                horizon = settings.nowcast_frames * settings.fetch_interval
-                history = settings.max_frames * settings.fetch_interval
-                await self._icon_eu_grid.fetch(
-                    history_seconds=history,
-                    horizon_seconds=horizon,
-                )
-            except Exception:
-                logger.warning("ICON-EU fetch failed, EU NWP layer may be stale")
-
-        # DMI HARMONIE-AROME DINI follows the same pattern as ICON-EU
-        # (3-hourly DMI cycles).  Sits ahead of ICON-EU in the chain to
-        # cover NW + central Europe at 2 km native resolution.
+            grid_specs.append((
+                "ICON-EU", self._icon_eu_grid,
+                {"history_seconds": nwp_history, "horizon_seconds": nwp_horizon},
+                "ICON-EU fetch failed, EU NWP layer may be stale",
+            ))
         if self._dmi_dini_grid is not None:
-            try:
-                horizon = settings.nowcast_frames * settings.fetch_interval
-                history = settings.max_frames * settings.fetch_interval
-                await self._dmi_dini_grid.fetch(
-                    history_seconds=history,
-                    horizon_seconds=horizon,
-                )
-            except Exception:
-                logger.warning("DMI DINI fetch failed, NW Europe NWP layer may be stale")
+            grid_specs.append((
+                "DMI DINI", self._dmi_dini_grid,
+                {"history_seconds": nwp_history, "horizon_seconds": nwp_horizon},
+                "DMI DINI fetch failed, NW Europe NWP layer may be stale",
+            ))
+
+        if grid_specs:
+            cap = max(settings.nwp_fetch_concurrency, 1)
+            semaphore = asyncio.Semaphore(cap)
+
+            async def _run(label: str, grid, kwargs: dict, fail_msg: str) -> None:
+                async with semaphore:
+                    started = time.time()
+                    try:
+                        await grid.fetch(**kwargs)
+                        logger.debug(
+                            "%s fetch finished in %.1fs", label, time.time() - started,
+                        )
+                    except Exception:
+                        logger.warning(fail_msg)
+
+            await asyncio.gather(*[
+                _run(label, grid, kwargs, msg)
+                for label, grid, kwargs, msg in grid_specs
+            ])
 
         # Cloud data loads in the background — never blocks radar startup.
         # Skip if a previous fetch is still running (downloading .om files
