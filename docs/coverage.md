@@ -20,18 +20,27 @@ fetcher and renderer respect.
 
 ![Radar coverage map](coverage-map-radar.png)
 
-| Source | Coverage | Cadence | Resolution |
-|---|---|---|---|
-| NOAA MRMS — CONUS | Continental US | 2 min | ~0.005° (~500 m) |
-| NOAA MRMS — Alaska | Alaska | 2 min | ~0.01° |
-| NOAA MRMS — Hawaii | Hawaiian Islands | 2 min | ~0.005° |
-| NOAA MRMS — Puerto Rico | Puerto Rico + USVI | 2 min | ~0.01° |
-| NOAA MRMS — Guam | Guam + CNMI | 2 min | ~0.0085° |
-| ECCC MSC Canada | Canada (national mosaic) | 6 min | ~0.025° |
-| EUMETNET OPERA | Europe (~155 radars, 24 countries) | 5 min | 1 km LAEA |
+Polygons show the **union of effective coverage circles** around every
+radar station in each network — 240 km per NEXRAD/ECCC station,
+300 km per OPERA C-band station, matching the runtime coverage mask
+in [`librewxr.data.coverage`](../src/librewxr/data/coverage.py). The
+bumpy outlines reflect real radar coverage gaps (e.g. far northern
+Canada, eastern Aleutians, the Mediterranean between Greece and Cyprus,
+the Norwegian/Faroe gap above Iceland) rather than a lat/lon bounding
+box that would have implied coverage where none exists.
 
-MRMS and MSC blending fills Canadian gaps where one provider's coverage
-ends; OPERA is a single pan-European composite.
+| Source | Stations | Per-station range | Composite cadence | Composite resolution |
+|---|---|---|---|---|
+| NOAA MRMS — CONUS | NEXRAD WSR-88D (~160) | 240 km | 2 min | ~0.005° (~500 m) |
+| NOAA MRMS — Alaska | NEXRAD WSR-88D (7) | 240 km | 2 min | ~0.01° |
+| NOAA MRMS — Hawaii | NEXRAD WSR-88D (4) | 240 km | 2 min | ~0.005° |
+| NOAA MRMS — Puerto Rico | NEXRAD WSR-88D (1) | 240 km | 2 min | ~0.01° |
+| NOAA MRMS — Guam | NEXRAD WSR-88D (1) | 240 km | 2 min | ~0.0085° |
+| ECCC MSC Canada | S-band dual-pol (32) | 240 km | 6 min | ~0.025° |
+| EUMETNET OPERA | C-band (~155, 24 countries) | 300 km | 5 min | 1 km LAEA |
+
+MRMS and MSC ingest each other's stations along the US/Canada border,
+so the cross-border zone has overlap rather than a hard seam.
 
 ---
 

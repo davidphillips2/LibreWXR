@@ -30,6 +30,7 @@ Basemap: Natural Earth Vector 1:110m country polygons (CC0).
 from __future__ import annotations
 
 import json
+import sys
 from dataclasses import dataclass
 from math import asin, atan2, cos, degrees, radians, sin
 from pathlib import Path
@@ -39,11 +40,28 @@ import matplotlib.pyplot as plt
 from matplotlib.patches import Patch, PathPatch
 from matplotlib.path import Path as MplPath
 from pyproj import CRS, Transformer
+from shapely.geometry import Polygon as ShapelyPolygon
+from shapely.ops import unary_union
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 RADAR_OUTPUT = REPO_ROOT / "docs" / "coverage-map-radar.png"
 MODEL_OUTPUT = REPO_ROOT / "docs" / "coverage-map-models.png"
 BASEMAP_PATH = Path("/tmp/ne_countries.geojson")
+
+# Pull radar station lists from the project source so adding a new
+# station updates the map without a second edit.
+sys.path.insert(0, str(REPO_ROOT / "src"))
+from librewxr.data.radar_stations import (  # noqa: E402
+    NEXRAD_CONUS,
+    NEXRAD_ALASKA,
+    NEXRAD_HAWAII,
+    NEXRAD_PUERTO_RICO,
+    NEXRAD_GUAM,
+    CANADA_STATIONS,
+    OPERA_STATIONS,
+    RADAR_RANGE_KM,
+    REGION_RADAR_RANGE,
+)
 
 
 # ── Coverage source definitions ────────────────────────────────────────
@@ -90,6 +108,44 @@ def latlon_box(west: float, east: float, south: float, north: float) -> np.ndarr
     return np.array([
         [west, north], [east, north], [east, south], [west, south], [west, north],
     ])
+
+
+def union_of_radar_circles(
+    stations: list[tuple[float, float]],
+    radius_km: float,
+    samples_per_circle: int = 72,
+) -> list[np.ndarray]:
+    """Build the union of radar coverage circles as one or more polygons.
+
+    Each station gets a circle of ``radius_km`` km approximated by
+    ``samples_per_circle`` points using the local flat-earth scale
+    (1° lat ≈ 111 km, 1° lon ≈ 111·cos(lat) km — same convention the
+    project's ``coverage.py`` mask uses).  All circles are unioned via
+    shapely and returned as a list of (N, 2) lon/lat arrays — one per
+    disjoint piece of coverage (so e.g. Iceland's stations stay
+    separated from continental Europe's where the gap exceeds station
+    range).
+    """
+    circles: list[ShapelyPolygon] = []
+    angles = np.linspace(0, 2 * np.pi, samples_per_circle, endpoint=False)
+    cos_a, sin_a = np.cos(angles), np.sin(angles)
+    for st_lat, st_lon in stations:
+        dlat = (radius_km / 111.0) * cos_a
+        dlon = (radius_km / (111.0 * cos(radians(st_lat)))) * sin_a
+        ring = np.column_stack([st_lon + dlon, st_lat + dlat])
+        # Shapely tolerates open rings (closes them implicitly).
+        circles.append(ShapelyPolygon(ring))
+
+    merged = unary_union(circles)
+    polygons: list[np.ndarray] = []
+    if merged.geom_type == "Polygon":
+        polygons.append(np.asarray(merged.exterior.coords))
+    elif merged.geom_type == "MultiPolygon":
+        for poly in merged.geoms:
+            polygons.append(np.asarray(poly.exterior.coords))
+    else:
+        raise ValueError(f"unexpected merge result: {merged.geom_type}")
+    return polygons
 
 
 # Explicit rotated-pole inverse via Cartesian rotation on the unit
@@ -176,32 +232,45 @@ def rotated_pole_polygon(
 
 
 def build_radar_sources() -> list[Source]:
+    """Build per-station union-of-circles polygons for every radar source.
+
+    Reads the station lists straight from
+    ``librewxr.data.radar_stations`` so adding or removing a station
+    propagates through to the map automatically.  Range is
+    ``RADAR_RANGE_KM`` (240 km) by default, overridden per-region via
+    ``REGION_RADAR_RANGE`` (300 km for OPERA's C-band network) — same
+    numbers the runtime coverage mask uses.
+    """
     radar: list[Source] = []
-    # MRMS — five lat/lon composites all coloured the same since they
-    # share an upstream operator.
+
+    def range_for(region: str) -> float:
+        return REGION_RADAR_RANGE.get(region, RADAR_RANGE_KM)
+
+    # MRMS — five composites sharing one upstream operator (NOAA) and
+    # one legend swatch.  Each composite gets its own union polygon
+    # built from that region's NEXRAD stations.
     mrms_color = "#1f77b4"
-    for label, w, e, s, n in [
-        ("MRMS — CONUS",       -126.0, -65.0, 23.0, 50.0),
-        ("MRMS — Alaska",      -170.5, -130.5, 53.2, 68.7),
-        ("MRMS — Hawaii",      -162.4, -152.4, 15.4, 24.4),
-        ("MRMS — Puerto Rico", -71.1, -61.1, 13.1, 23.1),
-        ("MRMS — Guam",        140.5, 149.0, 9.2, 17.7),
-    ]:
-        radar.append(Source(label, mrms_color, latlon_box(w, e, s, n)))
+    mrms_groups = [
+        ("MRMS — CONUS",       NEXRAD_CONUS,        range_for("USCOMP")),
+        ("MRMS — Alaska",      NEXRAD_ALASKA,       range_for("AKCOMP")),
+        ("MRMS — Hawaii",      NEXRAD_HAWAII,       range_for("HICOMP")),
+        ("MRMS — Puerto Rico", NEXRAD_PUERTO_RICO,  range_for("PRCOMP")),
+        ("MRMS — Guam",        NEXRAD_GUAM,         range_for("GUCOMP")),
+    ]
+    for label, stations, radius_km in mrms_groups:
+        for poly in union_of_radar_circles(stations, radius_km):
+            radar.append(Source(label, mrms_color, poly))
 
-    radar.append(Source(
-        "MSC Canada radar", "#17becf",
-        latlon_box(-141.0, -52.0, 41.0, 84.0),
-    ))
+    # MSC Canada — ECCC's 32 S-band dual-pol stations at 240 km each.
+    for poly in union_of_radar_circles(CANADA_STATIONS, range_for("CACOMP")):
+        radar.append(Source("MSC Canada radar", "#17becf", poly))
 
-    # OPERA — LAEA projection, full grid extent
-    opera_crs = CRS.from_proj4(
-        "+proj=laea +lat_0=55 +lon_0=10 +x_0=1950000 +y_0=-2100000 +ellps=WGS84"
-    )
-    radar.append(Source(
-        "OPERA (Europe)", "#9467bd",
-        project_grid_perimeter(opera_crs, 0, 3_800_000, -4_400_000, 0),
-    ))
+    # OPERA — ~155 European stations at 300 km each (C-band).  The
+    # union naturally splits into a continental piece, Iceland,
+    # Ireland-and-Britain, etc. where station gaps exceed range.
+    for poly in union_of_radar_circles(OPERA_STATIONS, range_for("OPERA")):
+        radar.append(Source("OPERA (Europe)", "#9467bd", poly))
+
     return radar
 
 
@@ -433,9 +502,14 @@ def render(
         seen.add(key)
         label = key
         if dedupe_label_prefix and key == dedupe_label_prefix.rstrip(" —"):
-            # Count how many entries share the prefix
-            cnt = sum(1 for x in sources if x.label.startswith(dedupe_label_prefix))
-            label = f"{key} ({cnt} composites)"
+            # Count distinct labels (not Source rows — each composite may
+            # produce several disjoint polygon pieces from the station
+            # union, which would otherwise inflate the count).
+            distinct = {
+                x.label for x in sources
+                if x.label.startswith(dedupe_label_prefix)
+            }
+            label = f"{key} ({len(distinct)} composites)"
         handles.append(Patch(
             facecolor=s.color, edgecolor=s.color,
             alpha=min(0.95, alpha_fill + 0.10), hatch=hatch,
