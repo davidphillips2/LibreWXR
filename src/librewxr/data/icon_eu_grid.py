@@ -37,6 +37,7 @@ import httpx
 import numpy as np
 
 from librewxr.config import settings
+from librewxr.data.hrrr_grid import compute_snow_mask
 
 logger = logging.getLogger(__name__)
 
@@ -285,6 +286,78 @@ def decode_tp_message(grib_bytes: bytes) -> np.ndarray | None:
     return np.ascontiguousarray(arr, dtype=np.float32)
 
 
+def decode_t_2m_message(grib_bytes: bytes) -> np.ndarray | None:
+    """Decode an ICON-EU ``T_2M`` GRIB2 message into Celsius float32.
+
+    Returns ``None`` on parse failure.  Output shape is
+    ``(ICON_EU_GRID_HEIGHT, ICON_EU_GRID_WIDTH)`` with row 0 at the
+    NORTHERN edge.  DWD reports T_2M in Kelvin per GRIB convention;
+    we subtract 273.15 before returning so the threshold comparison
+    in ``compute_snow_mask`` runs in °C, matching every other regional
+    NWP source in the chain.
+    """
+    import xarray as xr
+
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".grib2", delete=False) as tmp:
+            tmp.write(grib_bytes)
+            tmp_path = tmp.name
+        with _suppress_eccodes_stderr():
+            ds = xr.open_dataset(
+                tmp_path,
+                engine="cfgrib",
+                backend_kwargs={"indexpath": ""},
+            )
+        ds = ds.compute()
+    except Exception:
+        logger.exception("Failed to decode ICON-EU T_2M GRIB2 message")
+        return None
+    finally:
+        if tmp_path is not None:
+            try:
+                Path(tmp_path).unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    if "t2m" in ds.data_vars:
+        arr = ds["t2m"].values
+    elif "2t" in ds.data_vars:
+        arr = ds["2t"].values
+    else:
+        for name, da in ds.data_vars.items():
+            if da.ndim == 2 and da.shape == (ICON_EU_GRID_HEIGHT, ICON_EU_GRID_WIDTH):
+                logger.warning(
+                    "ICON-EU T_2M variable not named 't2m' (got %r); using fallback",
+                    name,
+                )
+                arr = da.values
+                break
+        else:
+            logger.warning("ICON-EU GRIB had no recognised T_2M field")
+            return None
+
+    if arr.shape != (ICON_EU_GRID_HEIGHT, ICON_EU_GRID_WIDTH):
+        logger.warning(
+            "ICON-EU T_2M has unexpected shape %s (expected %s); skipping",
+            arr.shape, (ICON_EU_GRID_HEIGHT, ICON_EU_GRID_WIDTH),
+        )
+        return None
+
+    if "latitude" in ds.coords:
+        lat_first = float(np.asarray(ds["latitude"].values).flat[0])
+        lat_last = float(np.asarray(ds["latitude"].values).flat[-1])
+        needs_flip = lat_first < lat_last
+    else:
+        needs_flip = True
+    if needs_flip:
+        arr = np.flipud(arr)
+
+    # cfgrib returns T_2M in Kelvin; convert to Celsius for the threshold.
+    celsius = np.ascontiguousarray(arr, dtype=np.float32) - 273.15
+    return celsius
+
+
 def decompress_bz2(data: bytes) -> bytes:
     """Decompress a bzip2-encoded GRIB2 payload."""
     return bz2.decompress(data)
@@ -305,6 +378,11 @@ class ICONEUGrid:
         # only long enough to compute the rate at the next forecast step;
         # purged on eviction.
         self._accum: dict[tuple[int, int], np.ndarray] = {}
+        # Per-frame snow mask (1 = snow, 0 = rain) keyed by the same
+        # (run_ts, lead_seconds) as ``_frames``.  Derived from a
+        # separate T_2M bz2 file at the DWD opendata URL pattern; one
+        # extra HTTPS GET per leadtime, bandwidth-cheap.
+        self._snow_masks: dict[tuple[int, int], np.ndarray] = {}
         self._client: httpx.AsyncClient | None = None
         self._latest_run_ts: int | None = None
         self._fetch_lock = asyncio.Lock()
@@ -328,6 +406,9 @@ class ICONEUGrid:
     def _frame_path(self, run_ts: int, lead_seconds: int) -> Path:
         return self._memmap_dir / f"r{run_ts}_l{lead_seconds}.dat"
 
+    def _snow_frame_path(self, run_ts: int, lead_seconds: int) -> Path:
+        return self._memmap_dir / f"r{run_ts}_l{lead_seconds}_snow.dat"
+
     def _to_memmap(self, name: str, data: np.ndarray) -> np.ndarray:
         final = self._memmap_dir / f"{name}.dat"
         tmp = final.with_suffix(".dat.tmp")
@@ -346,6 +427,8 @@ class ICONEUGrid:
         for path in self._memmap_dir.glob("r*_l*.dat"):
             m = pat.match(path.stem)
             if m is None:
+                # Skip snow files ("rNNN_lNNN_snow"); they're loaded in
+                # the second pass below alongside their precip parents.
                 continue
             run_ts = int(m.group(1))
             lead_s = int(m.group(2))
@@ -364,6 +447,38 @@ class ICONEUGrid:
             loaded += 1
         if loaded:
             logger.info("ICON-EU: loaded %d cached frame(s) from disk", loaded)
+
+        # Second pass: snow masks.  Orphans (no matching precip frame)
+        # are removed so they don't accumulate across restarts.
+        snow_pat = re.compile(r"^r(\d+)_l(\d+)_snow$")
+        snow_loaded = 0
+        for path in self._memmap_dir.glob("r*_l*_snow.dat"):
+            m = snow_pat.match(path.stem)
+            if m is None:
+                continue
+            run_ts = int(m.group(1))
+            lead_s = int(m.group(2))
+            if (run_ts, lead_s) not in self._frames:
+                path.unlink(missing_ok=True)
+                continue
+            try:
+                mm = np.memmap(
+                    path, dtype=np.uint8, mode="r",
+                    shape=(ICON_EU_GRID_HEIGHT, ICON_EU_GRID_WIDTH),
+                )
+            except Exception:
+                logger.warning(
+                    "Failed to memmap cached snow %s, removing", path,
+                )
+                path.unlink(missing_ok=True)
+                continue
+            self._snow_masks[(run_ts, lead_s)] = mm
+            snow_loaded += 1
+        if snow_loaded:
+            logger.info(
+                "ICON-EU: loaded %d cached snow mask(s) from disk",
+                snow_loaded,
+            )
 
     def __getstate__(self) -> dict:
         """Serialize state for cross-process reload (multi-worker mode).
@@ -385,12 +500,17 @@ class ICONEUGrid:
         self._client = None
         self._fetch_lock = asyncio.Lock()
         self._frames = {}
+        self._accum = {}
+        self._snow_masks = {}
         self._latest_run_ts = None
         self._load_cached_frames()
 
     @property
     def data_bytes(self) -> int:
-        return sum(arr.nbytes for arr in self._frames.values())
+        return (
+            sum(arr.nbytes for arr in self._frames.values())
+            + sum(arr.nbytes for arr in self._snow_masks.values())
+        )
 
     @property
     def latest_run_iso(self) -> str | None:
@@ -401,6 +521,10 @@ class ICONEUGrid:
     @property
     def frame_count(self) -> int:
         return len(self._frames)
+
+    @property
+    def snow_mask_count(self) -> int:
+        return len(self._snow_masks)
 
     # ── NWPSource Protocol ────────────────────────────────────────────
 
@@ -431,7 +555,7 @@ class ICONEUGrid:
 
     @property
     def supports_snow(self) -> bool:
-        return False
+        return True
 
     def get_snow_mask(
         self,
@@ -439,7 +563,37 @@ class ICONEUGrid:
         lon: np.ndarray,
         timestamp: int | None = None,
     ) -> np.ndarray:
-        return np.zeros(lat.shape, dtype=bool)
+        """Sample the snow / rain classification at each (lat, lon, ts).
+
+        Mirrors ``sample`` for the parallel T_2M-derived snow mask:
+        same run picker, same bracket-lerp, then re-binarise at 0.5.
+        Returns ``False`` everywhere if no snow mask is loaded for the
+        bracket — the chain dispatcher then falls through to the next
+        snow-capable source (IFS, globally) for those pixels.
+        """
+        if timestamp is None or not self._snow_masks:
+            return np.zeros(lat.shape, dtype=bool)
+        run = self._pick_run(timestamp)
+        if run is None:
+            return np.zeros(lat.shape, dtype=bool)
+        lead = timestamp - run
+        l0, l1, alpha = bracket_lead_seconds(lead, self._bracket_interval())
+        s0 = self._snow_masks.get((run, l0))
+        s1 = self._snow_masks.get((run, l1))
+        if s0 is None or s1 is None:
+            return np.zeros(lat.shape, dtype=bool)
+        if alpha == 0.0:
+            grid = s0
+        elif alpha == 1.0:
+            grid = s1
+        else:
+            lerped = (
+                (1.0 - alpha) * s0.astype(np.float32)
+                + alpha * s1.astype(np.float32)
+            )
+            grid = (lerped >= 0.5).astype(np.uint8)
+        sampled = _sample_grid(grid, lat, lon, bilinear=False)
+        return sampled.astype(bool)
 
     def sample(
         self,
@@ -590,15 +744,14 @@ class ICONEUGrid:
     def _interpolate_run_frames(self, run_ts: int) -> int:
         """Fill 10-min synthetic frames between hourly originals for one run.
 
-        Pulls this run's hourly precip frames out of ``self._frames``,
-        delegates to the shared Farneback warper, and memmap-writes the
-        synthetic frames back into ``self._frames`` at the new
-        ``lead_seconds`` keys.  ICON-EU does not yet derive a snow mask
-        (that's a Phase 9 follow-up), so we pass ``None`` for the snow
-        side — only precip frames get interpolated.
+        Pulls this run's hourly precip + snow frames out of
+        ``self._frames`` / ``self._snow_masks``, delegates to the shared
+        Farneback warper, and memmap-writes synthetic frames (precip
+        and snow side-by-side) back into the in-memory dicts at the
+        new ``lead_seconds`` keys.
 
-        Returns the number of synthetic frames added.  Idempotent: if
-        the run already has stored-interval spacing, no work is done.
+        Returns the number of synthetic precip frames added.  Idempotent:
+        if the run already has stored-interval spacing, no work is done.
         """
         from librewxr.data.nwp_interpolation import interpolate_run
 
@@ -609,10 +762,17 @@ class ICONEUGrid:
         }
         if len(frames_by_lead) < 2:
             return 0
+        snow_by_lead: dict[int, np.ndarray] | None = {
+            lead: arr
+            for (r, lead), arr in self._snow_masks.items()
+            if r == run_ts
+        }
+        if not snow_by_lead:
+            snow_by_lead = None
 
-        aug_frames, _aug_snow, _flow = interpolate_run(
+        aug_frames, aug_snow, _flow = interpolate_run(
             frames_by_lead,
-            snow_masks_by_ts=None,
+            snow_masks_by_ts=snow_by_lead,
             target_interval_seconds=STORED_INTERVAL_SECONDS,
             log_label=f"ICON-EU interpolation (run {run_ts})",
         )
@@ -624,6 +784,21 @@ class ICONEUGrid:
             mm = self._to_memmap(f"r{run_ts}_l{lead}", arr)
             self._frames[(run_ts, lead)] = mm
             added += 1
+        if aug_snow is not None:
+            for lead, snow_arr in aug_snow.items():
+                if (run_ts, lead) in self._snow_masks:
+                    continue
+                if (run_ts, lead) not in self._frames:
+                    continue
+                snow_uint8 = (
+                    snow_arr.astype(np.uint8)
+                    if snow_arr.dtype != np.uint8
+                    else snow_arr
+                )
+                mm = self._to_memmap(
+                    f"r{run_ts}_l{lead}_snow", snow_uint8,
+                )
+                self._snow_masks[(run_ts, lead)] = mm
         return added
 
     async def _fetch_one_step(
@@ -693,7 +868,48 @@ class ICONEUGrid:
         self._frames[(run_ts, lead_seconds)] = mm
         self._accum[(run_ts, step_hour)] = accum
 
+        # Snow side: a separate t_2m.bz2 file at the same DWD URL
+        # pattern.  One extra HTTPS GET per leadtime, bandwidth-cheap
+        # (T_2M bz2's compress well).  Decode failures are non-fatal:
+        # the precip frame still lands and ``get_snow_mask`` falls
+        # through to the next chain source for the affected bracket.
+        if (run_ts, lead_seconds) not in self._snow_masks:
+            await self._fetch_and_store_snow(run, step_hour, client)
+
         return 1
+
+    async def _fetch_and_store_snow(
+        self,
+        run: datetime,
+        step_hour: int,
+        client: httpx.AsyncClient,
+    ) -> None:
+        """Fetch the t_2m.bz2 file for one step and write its snow mask."""
+        from librewxr.data.retry import retry_get
+
+        run_ts = int(run.timestamp())
+        lead_seconds = step_hour * BRACKET_INTERVAL_SECONDS
+        url = file_url(run, step_hour, "t_2m")
+        resp = await retry_get(client, url, log_name="ICON-EU T_2M")
+        if resp is None:
+            return
+        try:
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            logger.warning("ICON-EU T_2M fetch failed for %s: %s", url, e)
+            return
+        try:
+            grib_bytes = decompress_bz2(resp.content)
+        except Exception:
+            logger.exception("ICON-EU T_2M bz2 decompress failed for %s", url)
+            return
+        t2_celsius = decode_t_2m_message(grib_bytes)
+        if t2_celsius is None:
+            return
+        threshold = settings.regional_snow_temp_threshold
+        snow = compute_snow_mask(t2_celsius, threshold)
+        mm = self._to_memmap(f"r{run_ts}_l{lead_seconds}_snow", snow)
+        self._snow_masks[(run_ts, lead_seconds)] = mm
 
     # ── Eviction ──────────────────────────────────────────────────────
 
@@ -709,8 +925,28 @@ class ICONEUGrid:
                 stale_frames.append(key)
         for key in stale_frames:
             self._frames.pop(key, None)
+            self._snow_masks.pop(key, None)
             try:
                 self._frame_path(*key).unlink(missing_ok=True)
+            except OSError:
+                pass
+            try:
+                self._snow_frame_path(*key).unlink(missing_ok=True)
+            except OSError:
+                pass
+        # Also evict orphan snow masks whose precip frame is gone — can
+        # happen if T_2M decoded successfully but tp for the prior step
+        # was never fetched (no precip frame at this lead got produced).
+        stale_orphan_snow = []
+        for key in self._snow_masks:
+            run_ts, lead = key
+            valid_time = run_ts + lead
+            if valid_time < ws or valid_time > we:
+                stale_orphan_snow.append(key)
+        for key in stale_orphan_snow:
+            self._snow_masks.pop(key, None)
+            try:
+                self._snow_frame_path(*key).unlink(missing_ok=True)
             except OSError:
                 pass
         # Drop accumulated cache for runs whose entire window is outside.
@@ -731,6 +967,7 @@ class ICONEUGrid:
     async def close(self) -> None:
         self._frames.clear()
         self._accum.clear()
+        self._snow_masks.clear()
         if self._client is not None and not self._client.is_closed:
             await self._client.aclose()
         self._client = None

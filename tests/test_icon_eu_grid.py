@@ -22,6 +22,7 @@ from librewxr.data.icon_eu_grid import (
     ICONEUGrid,
     bracket_lead_seconds,
     decode_tp_message,
+    decode_t_2m_message,
     domain_mask,
     feather_mask,
     file_url,
@@ -375,8 +376,9 @@ class TestInterpolateRunFrames:
         assert first == 5
         assert second == 0
 
-    def test_no_snow_mask_side_effects(self):
-        # ICON-EU doesn't have snow masks yet (Phase 9 follow-up).
+    def test_no_snow_masks_when_none_loaded(self):
+        # When no snow masks are loaded for the run, the interpolator
+        # produces precip frames only — no synthetic snow side appears.
         grid = ICONEUGrid()
         run_ts = int(datetime(2026, 5, 8, 6, tzinfo=timezone.utc).timestamp())
         grid._frames[(run_ts, 0)] = _make_blob(300, 500)
@@ -384,7 +386,9 @@ class TestInterpolateRunFrames:
         grid._latest_run_ts = run_ts
 
         grid._interpolate_run_frames(run_ts)
-        assert not hasattr(grid, "_snow_masks")
+        # Snow dict exists (ICON-EU supports snow now) but is empty
+        # because no T_2M data was decoded.
+        assert grid.snow_mask_count == 0
 
     def test_returns_zero_when_run_has_one_or_fewer_frames(self):
         grid = ICONEUGrid()
@@ -449,3 +453,296 @@ class TestRegionalInterpolationToggle:
     def test_bracket_interval_is_10min_when_enabled(self):
         grid = ICONEUGrid()
         assert grid._bracket_interval() == STORED_INTERVAL_SECONDS
+
+
+# ── T_2M decode orientation ──────────────────────────────────────────
+
+
+class TestDecodeT2MOrientation:
+    """``decode_t_2m_message`` flips south-up GRIBs and converts Kelvin → Celsius."""
+
+    def test_decode_flips_south_up_and_converts_kelvin(self, monkeypatch):
+        from contextlib import contextmanager
+        from librewxr.data import icon_eu_grid as icon_eu
+
+        # Synthetic cfgrib output in Kelvin: row 0 at southern edge.
+        # 283.15 K = +10 °C (warm south), 263.15 K = -10 °C (cold north)
+        t2 = np.full(
+            (ICON_EU_GRID_HEIGHT, ICON_EU_GRID_WIDTH), 273.15, dtype=np.float32,
+        )
+        t2[0, 100] = 283.15   # cfgrib row 0 = south
+        t2[-1, 200] = 263.15  # cfgrib row -1 = north
+
+        lat = np.linspace(
+            ICON_EU_LAT_MIN, ICON_EU_LAT_MAX, ICON_EU_GRID_HEIGHT,
+        )
+        lon = np.linspace(-23.5, 62.5, ICON_EU_GRID_WIDTH)
+
+        import xarray as xr
+        fake_ds = xr.Dataset(
+            {"t2m": (("latitude", "longitude"), t2)},
+            coords={"latitude": ("latitude", lat),
+                    "longitude": ("longitude", lon)},
+        )
+
+        @contextmanager
+        def _noop():
+            yield
+
+        monkeypatch.setattr(xr, "open_dataset", lambda *a, **kw: fake_ds)
+        monkeypatch.setattr(icon_eu, "_suppress_eccodes_stderr", _noop)
+
+        arr = decode_t_2m_message(b"ignored")
+        assert arr is not None
+        # After flip: south marker → our row -1 (south)
+        # After Kelvin → Celsius: 283.15 K - 273.15 = 10 °C
+        assert arr[-1, 100] == pytest.approx(10.0)
+        assert arr[0, 200] == pytest.approx(-10.0)
+
+
+# ── T_2M URL ─────────────────────────────────────────────────────────
+
+
+class TestT2MFileUrl:
+    """The ``t_2m`` URL path mirrors the ``tot_prec`` shape."""
+
+    def test_format_matches_dwd_pattern(self):
+        run = datetime(2026, 5, 14, 12, tzinfo=timezone.utc)
+        url = file_url(run, 3, "t_2m")
+        assert url.endswith(
+            "/12/t_2m/icon-eu_europe_regular-lat-lon_single-level_2026051412_003_T_2M.grib2.bz2"
+        )
+
+
+# ── Snow mask ────────────────────────────────────────────────────────
+
+
+def _inject_frame_and_snow(
+    grid: ICONEUGrid,
+    run_ts: int,
+    lead_seconds: int,
+    *,
+    snow_value: int | None = None,
+) -> None:
+    """Inject a uniform precip frame, optionally with a parallel snow mask."""
+    fake = np.zeros(
+        (ICON_EU_GRID_HEIGHT, ICON_EU_GRID_WIDTH), dtype=np.uint8,
+    )
+    grid._frames[(run_ts, lead_seconds)] = fake
+    if grid._latest_run_ts is None or run_ts > grid._latest_run_ts:
+        grid._latest_run_ts = run_ts
+    if snow_value is not None:
+        snow = np.full(
+            (ICON_EU_GRID_HEIGHT, ICON_EU_GRID_WIDTH),
+            snow_value & 0x01,
+            dtype=np.uint8,
+        )
+        grid._snow_masks[(run_ts, lead_seconds)] = snow
+
+
+class TestSnowMask:
+    """ICONEUGrid.get_snow_mask end-to-end behaviour."""
+
+    def test_supports_snow_is_true(self):
+        grid = ICONEUGrid()
+        assert grid.supports_snow is True
+
+    def test_no_loaded_masks_returns_all_false(self):
+        # Snow masks empty → falls through so the chain dispatcher
+        # reaches the next snow-capable source (IFS globally).
+        grid = ICONEUGrid()
+        out = grid.get_snow_mask(np.array([50.0]), np.array([10.0]))
+        assert out.dtype == np.bool_
+        assert not out.any()
+
+    def test_uniform_snow_returns_true_in_domain(self, hourly_brackets):
+        grid = ICONEUGrid()
+        run = int(datetime(2026, 5, 14, 0, tzinfo=timezone.utc).timestamp())
+        _inject_frame_and_snow(grid, run, 3 * 3600, snow_value=1)
+        _inject_frame_and_snow(grid, run, 4 * 3600, snow_value=1)
+
+        # Madrid — inside ICON-EU's domain (south of DINI)
+        out = grid.get_snow_mask(
+            np.array([40.42]), np.array([-3.70]),
+            timestamp=run + 3 * 3600 + 1800,
+        )
+        assert out.tolist() == [True]
+
+    def test_uniform_rain_returns_false_in_domain(self, hourly_brackets):
+        grid = ICONEUGrid()
+        run = int(datetime(2026, 5, 14, 0, tzinfo=timezone.utc).timestamp())
+        _inject_frame_and_snow(grid, run, 3 * 3600, snow_value=0)
+        _inject_frame_and_snow(grid, run, 4 * 3600, snow_value=0)
+
+        out = grid.get_snow_mask(
+            np.array([41.90]), np.array([12.50]),   # Rome
+            timestamp=run + 3 * 3600 + 1800,
+        )
+        assert out.tolist() == [False]
+
+    def test_outside_domain_returns_false(self, hourly_brackets):
+        grid = ICONEUGrid()
+        run = int(datetime(2026, 5, 14, 0, tzinfo=timezone.utc).timestamp())
+        _inject_frame_and_snow(grid, run, 3 * 3600, snow_value=1)
+        _inject_frame_and_snow(grid, run, 4 * 3600, snow_value=1)
+
+        # New York — well outside ICON-EU
+        out = grid.get_snow_mask(
+            np.array([40.71]), np.array([-74.01]),
+            timestamp=run + 3 * 3600 + 1800,
+        )
+        assert out.tolist() == [False]
+
+    def test_lerp_bracket_majority_at_midpoint(self, hourly_brackets):
+        grid = ICONEUGrid()
+        run = int(datetime(2026, 5, 14, 0, tzinfo=timezone.utc).timestamp())
+        _inject_frame_and_snow(grid, run, 3 * 3600, snow_value=0)
+        _inject_frame_and_snow(grid, run, 4 * 3600, snow_value=1)
+
+        # alpha=0.25 → L0 wins (rain)
+        out_low = grid.get_snow_mask(
+            np.array([40.42]), np.array([-3.70]),
+            timestamp=run + 3 * 3600 + 15 * 60,
+        )
+        assert out_low.tolist() == [False]
+
+        # alpha=0.75 → L1 wins (snow)
+        out_high = grid.get_snow_mask(
+            np.array([40.42]), np.array([-3.70]),
+            timestamp=run + 3 * 3600 + 45 * 60,
+        )
+        assert out_high.tolist() == [True]
+
+    def test_partial_bracket_returns_false(self, hourly_brackets):
+        # Precip at both leads, but only L0 has a snow mask.
+        grid = ICONEUGrid()
+        run = int(datetime(2026, 5, 14, 0, tzinfo=timezone.utc).timestamp())
+        _inject_frame_and_snow(grid, run, 3 * 3600, snow_value=1)
+        _inject_frame_and_snow(grid, run, 4 * 3600, snow_value=None)
+
+        out = grid.get_snow_mask(
+            np.array([40.42]), np.array([-3.70]),
+            timestamp=run + 3 * 3600 + 1800,
+        )
+        assert not out.any()
+
+
+class TestSnowMaskPersistence:
+    """Snow masks are atomic-write parallel files alongside precip frames."""
+
+    @pytest.mark.asyncio
+    async def test_snow_mask_round_trips_through_disk(self, tmp_path, hourly_brackets):
+        run_ts = int(datetime(2026, 5, 14, 6, tzinfo=timezone.utc).timestamp())
+
+        g1 = ICONEUGrid(cache_dir=tmp_path)
+        fake_precip = np.zeros(
+            (ICON_EU_GRID_HEIGHT, ICON_EU_GRID_WIDTH), dtype=np.uint8,
+        )
+        fake_snow = np.ones(
+            (ICON_EU_GRID_HEIGHT, ICON_EU_GRID_WIDTH), dtype=np.uint8,
+        )
+        for lead in (3 * 3600, 4 * 3600):
+            mm = g1._to_memmap(f"r{run_ts}_l{lead}", fake_precip)
+            g1._frames[(run_ts, lead)] = mm
+            mm_s = g1._to_memmap(f"r{run_ts}_l{lead}_snow", fake_snow)
+            g1._snow_masks[(run_ts, lead)] = mm_s
+        g1._latest_run_ts = run_ts
+        await g1.close()
+
+        cache_dir = tmp_path / "icon_eu"
+        assert (cache_dir / f"r{run_ts}_l{3*3600}.dat").exists()
+        assert (cache_dir / f"r{run_ts}_l{3*3600}_snow.dat").exists()
+
+        g2 = ICONEUGrid(cache_dir=tmp_path)
+        assert g2.frame_count == 2
+        assert g2.snow_mask_count == 2
+        assert (run_ts, 3 * 3600) in g2._snow_masks
+        assert (run_ts, 4 * 3600) in g2._snow_masks
+
+        sample_ts = run_ts + 3 * 3600 + 1800
+        out = g2.get_snow_mask(
+            np.array([40.42]), np.array([-3.70]),
+            timestamp=sample_ts,
+        )
+        assert out.tolist() == [True]
+        await g2.close()
+
+    @pytest.mark.asyncio
+    async def test_orphan_snow_mask_is_removed(self, tmp_path):
+        cache_dir = tmp_path / "icon_eu"
+        cache_dir.mkdir(parents=True)
+        orphan = cache_dir / "r1234_l3600_snow.dat"
+        size = ICON_EU_GRID_HEIGHT * ICON_EU_GRID_WIDTH
+        orphan.write_bytes(b"\x00" * size)
+        assert orphan.exists()
+
+        g = ICONEUGrid(cache_dir=tmp_path)
+        assert not orphan.exists()
+        assert g.snow_mask_count == 0
+        await g.close()
+
+    @pytest.mark.asyncio
+    async def test_eviction_removes_snow_files_too(self, tmp_path):
+        run_ts = int(datetime(2026, 5, 14, 6, tzinfo=timezone.utc).timestamp())
+        g = ICONEUGrid(cache_dir=tmp_path)
+        fake_precip = np.zeros(
+            (ICON_EU_GRID_HEIGHT, ICON_EU_GRID_WIDTH), dtype=np.uint8,
+        )
+        fake_snow = np.ones(
+            (ICON_EU_GRID_HEIGHT, ICON_EU_GRID_WIDTH), dtype=np.uint8,
+        )
+        g._to_memmap(f"r{run_ts}_l3600", fake_precip)
+        g._to_memmap(f"r{run_ts}_l3600_snow", fake_snow)
+        mm = np.memmap(
+            tmp_path / "icon_eu" / f"r{run_ts}_l3600.dat",
+            dtype=np.uint8, mode="r",
+            shape=(ICON_EU_GRID_HEIGHT, ICON_EU_GRID_WIDTH),
+        )
+        g._frames[(run_ts, 3600)] = mm
+        mm_s = np.memmap(
+            tmp_path / "icon_eu" / f"r{run_ts}_l3600_snow.dat",
+            dtype=np.uint8, mode="r",
+            shape=(ICON_EU_GRID_HEIGHT, ICON_EU_GRID_WIDTH),
+        )
+        g._snow_masks[(run_ts, 3600)] = mm_s
+
+        far_future = run_ts + 7 * 24 * 3600
+        g._evict_outside_window(far_future, far_future + 600)
+        assert (run_ts, 3600) not in g._frames
+        assert (run_ts, 3600) not in g._snow_masks
+        assert not (tmp_path / "icon_eu" / f"r{run_ts}_l3600.dat").exists()
+        assert not (tmp_path / "icon_eu" / f"r{run_ts}_l3600_snow.dat").exists()
+        await g.close()
+
+
+class TestChainSnowMaskWithIconEU:
+    def test_chain_prefers_icon_eu_snow_inside_domain(self, hourly_brackets):
+        from librewxr.data.ecmwf_grid import ECMWFGrid
+        from librewxr.data.ecmwf_grid import GRID_HEIGHT as IFS_H, GRID_WIDTH as IFS_W
+
+        # IFS says snow everywhere; ICON-EU says rain inside its domain.
+        # Inside ICON-EU, ICON-EU wins → rain.  Outside (NYC), IFS wins → snow.
+        ifs = ECMWFGrid()
+        ifs_dbz = np.full((IFS_H, IFS_W), int((10 + 32) * 2), dtype=np.uint8)
+        ifs_snow = np.ones((IFS_H, IFS_W), dtype=bool)
+        ifs._timesteps[1000000] = (ifs_dbz, ifs_snow)
+        ifs._sorted_timestamps = [1000000]
+
+        icon = ICONEUGrid()
+        run = 1000000 - 1800   # 30 min into the (0, 3600) bracket
+        _inject_frame_and_snow(icon, run, 0, snow_value=0)
+        _inject_frame_and_snow(icon, run, 3600, snow_value=0)
+
+        chain = NWPChain([icon, ifs])
+
+        # Madrid: ICON-EU says rain → False
+        out = chain.get_snow_mask(
+            np.array([40.42]), np.array([-3.70]), timestamp=1000000,
+        )
+        assert out.tolist() == [False]
+
+        # New York: outside ICON-EU → IFS wins → True
+        out = chain.get_snow_mask(
+            np.array([40.71]), np.array([-74.01]), timestamp=1000000,
+        )
+        assert out.tolist() == [True]
