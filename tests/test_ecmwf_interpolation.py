@@ -6,11 +6,11 @@ import pytest
 
 pytestmark = pytest.mark.ecmwf
 
-from librewxr.data.ecmwf_interpolation import (
+from librewxr.data.ecmwf_interpolation import interpolate_timesteps
+from librewxr.data.nwp_interpolation import (
     _compute_flow,
-    _interpolate_frame,
+    _interpolate_precip as _interpolate_frame,
     _interpolate_snow,
-    interpolate_timesteps,
 )
 
 

@@ -216,7 +216,18 @@ def precip_rate_to_dbz_encoded(
 # ── Run / step timing ─────────────────────────────────────────────────
 
 CYCLE_INTERVAL_SECONDS = 6 * 3600        # SMN deterministic runs every 6 h
-BRACKET_INTERVAL_SECONDS = 3600          # forecast steps are 1 hour apart
+SOURCE_STEP_SECONDS = 3600               # forecast steps are 1 hour apart in the source files
+# Backwards-compatible alias — existing call sites read it via ``settings``
+# and tests reference the name directly.  Prefer ``SOURCE_STEP_SECONDS``
+# in new code.
+BRACKET_INTERVAL_SECONDS = SOURCE_STEP_SECONDS
+# After optical-flow interpolation runs at the end of each fetch cycle,
+# frames are stored at 10-minute spacing within each run (matching the
+# radar / nowcast cadence).  Bracket lerp in ``sample`` walks at this
+# finer interval so a query 1500 s into the run reads from the
+# interpolated frame at 1200 s + small lerp into the frame at 1800 s,
+# rather than cross-fading between the hourly bracket pair.
+STORED_INTERVAL_SECONDS = 600
 MAX_FORECAST_HOURS = 72                  # all runs reach +72 h
 
 # Two cycles of lookback (12 h) is plenty: each run covers +72 h, far
@@ -242,17 +253,26 @@ def latest_published_run(now_ts: int, publish_delay_seconds: int) -> int:
     return floor_cycle(now_ts - publish_delay_seconds)
 
 
-def bracket_lead_seconds(lead_seconds: int) -> tuple[int, int, float]:
+def bracket_lead_seconds(
+    lead_seconds: int,
+    interval_seconds: int = SOURCE_STEP_SECONDS,
+) -> tuple[int, int, float]:
     """For a desired lead, return ``(L0, L1, alpha)`` such that L0 ≤ L < L1.
 
-    Both leads are exact hour multiples (multiples of 3600 s, ≥ 0).
-    Alpha is the lerp weight: 0 at L0, 1 at L1.
+    Both leads are exact multiples of ``interval_seconds``, ≥ 0.  Alpha
+    is the lerp weight: 0 at L0, 1 at L1.
+
+    Defaults to ``SOURCE_STEP_SECONDS`` (3600 s — the raw hourly source
+    cadence).  Pass ``STORED_INTERVAL_SECONDS`` (600 s) to bracket
+    against the post-interpolation cadence — that's what the
+    ``WRFSMNGrid`` class does internally when ``LIBREWXR_REGIONAL_INTERPOLATION``
+    is enabled.
     """
     if lead_seconds < 0:
         return 0, 0, 0.0
-    l0 = (lead_seconds // BRACKET_INTERVAL_SECONDS) * BRACKET_INTERVAL_SECONDS
-    l1 = l0 + BRACKET_INTERVAL_SECONDS
-    alpha = (lead_seconds - l0) / BRACKET_INTERVAL_SECONDS
+    l0 = (lead_seconds // interval_seconds) * interval_seconds
+    l1 = l0 + interval_seconds
+    alpha = (lead_seconds - l0) / interval_seconds
     return l0, l1, alpha
 
 
@@ -587,8 +607,16 @@ class WRFSMNGrid:
         if run is None:
             return False
         lead = timestamp - run
-        l0, l1, _ = bracket_lead_seconds(lead)
+        l0, l1, _ = bracket_lead_seconds(lead, self._bracket_interval())
         return ((run, l0) in self._frames) and ((run, l1) in self._frames)
+
+    def _bracket_interval(self) -> int:
+        """Stored frame spacing — finer when interpolation is enabled."""
+        return (
+            STORED_INTERVAL_SECONDS
+            if settings.regional_interpolation
+            else SOURCE_STEP_SECONDS
+        )
 
     @property
     def supports_snow(self) -> bool:
@@ -615,7 +643,7 @@ class WRFSMNGrid:
         if run is None:
             return np.zeros(lat.shape, dtype=bool)
         lead = timestamp - run
-        l0, l1, alpha = bracket_lead_seconds(lead)
+        l0, l1, alpha = bracket_lead_seconds(lead, self._bracket_interval())
         s0 = self._snow_masks.get((run, l0))
         s1 = self._snow_masks.get((run, l1))
         if s0 is None or s1 is None:
@@ -646,7 +674,7 @@ class WRFSMNGrid:
         if run is None:
             return np.zeros(lat.shape, dtype=np.uint8)
         lead = timestamp - run
-        l0, l1, alpha = bracket_lead_seconds(lead)
+        l0, l1, alpha = bracket_lead_seconds(lead, self._bracket_interval())
         f0 = self._frames.get((run, l0))
         f1 = self._frames.get((run, l1))
         if f0 is None or f1 is None:
@@ -666,12 +694,13 @@ class WRFSMNGrid:
     # ── Run selection ─────────────────────────────────────────────────
 
     def _pick_run(self, timestamp: int) -> int | None:
+        interval = self._bracket_interval()
         loaded_runs = sorted({r for (r, _) in self._frames}, reverse=True)
         for run in loaded_runs:
             lead = timestamp - run
             if not (0 <= lead <= MAX_FORECAST_HOURS * 3600):
                 continue
-            l0, l1, _ = bracket_lead_seconds(lead)
+            l0, l1, _ = bracket_lead_seconds(lead, interval)
             if (run, l0) in self._frames and (run, l1) in self._frames:
                 return run
         return None
@@ -704,7 +733,7 @@ class WRFSMNGrid:
     ) -> None:
         """Refresh the in-memory window.
 
-        Two-phase pipeline keyed on the SMN file size (~34 MB each):
+        Three-phase pipeline keyed on the SMN file size (~34 MB each):
 
         1. **Parallel download** — each (run, step) pair that's not
            already cached gets fetched concurrently up to
@@ -717,6 +746,12 @@ class WRFSMNGrid:
            ``rate = accum[F] - accum[F-1]``, encode to dBZ, and
            memmap-write the result.  Pure CPU; runs in a few hundred
            milliseconds for the whole window.
+        3. **Optical-flow interpolation per run** (if
+           ``LIBREWXR_REGIONAL_INTERPOLATION`` is on) — fill in
+           10-minute synthetic frames between hourly originals using
+           Farneback dense flow.  Without this, cells appear to
+           cross-fade between hourly bracket frames at intermediate
+           query times; with it, they translate smoothly.
         """
         async with self._fetch_lock:
             if now_ts is None:
@@ -801,19 +836,93 @@ class WRFSMNGrid:
                     if added > 0:
                         total_fetched += added
 
+            # ── Phase 3: optical-flow interpolation per run ─────────
+            total_interpolated = 0
+            if settings.regional_interpolation:
+                touched_runs = {r for (r, _, _, _) in run_step_ranges}
+                for run_ts in touched_runs:
+                    total_interpolated += self._interpolate_run_frames(run_ts)
+
             self._evict_outside_window(window_start, window_end)
 
             if total_fetched:
                 logger.info(
-                    "WRF-SMN: %d frame(s) ingested across %d run(s); "
-                    "store now holds %d frame(s)",
-                    total_fetched, len(runs_to_consider), len(self._frames),
+                    "WRF-SMN: %d hourly frame(s) ingested + %d interpolated "
+                    "across %d run(s); store now holds %d frame(s)",
+                    total_fetched, total_interpolated,
+                    len(runs_to_consider), len(self._frames),
                 )
             elif total_failed:
                 logger.warning(
                     "WRF-SMN: no frames ingested (%d file(s) failed)",
                     total_failed,
                 )
+
+    def _interpolate_run_frames(self, run_ts: int) -> int:
+        """Fill 10-min synthetic frames between hourly originals for one run.
+
+        Reads the hourly precip + snow frames already in ``self._frames``
+        / ``self._snow_masks`` for ``run_ts``, delegates to the shared
+        Farneback warper, writes synthetic frames to memmap, and
+        registers them in the in-memory dicts at the new ``lead_seconds``
+        keys.  Returns the number of synthetic precip frames added.
+
+        Idempotent: if the run already has stored-interval spacing
+        (because a prior fetch cycle interpolated it), no work is done.
+        """
+        from librewxr.data.nwp_interpolation import interpolate_run
+
+        # Pull this run's frames, keyed by lead_seconds.
+        frames_by_lead: dict[int, np.ndarray] = {
+            lead: arr
+            for (r, lead), arr in self._frames.items()
+            if r == run_ts
+        }
+        if len(frames_by_lead) < 2:
+            return 0
+        snow_by_lead: dict[int, np.ndarray] | None = {
+            lead: arr
+            for (r, lead), arr in self._snow_masks.items()
+            if r == run_ts
+        }
+        if not snow_by_lead:
+            snow_by_lead = None
+
+        aug_frames, aug_snow, _flow = interpolate_run(
+            frames_by_lead,
+            snow_by_lead,
+            target_interval_seconds=STORED_INTERVAL_SECONDS,
+            log_label=f"WRF-SMN interpolation (run {run_ts})",
+        )
+
+        # Memmap-write any new synthetic frames + snow masks.
+        added_precip = 0
+        for lead, arr in aug_frames.items():
+            if (run_ts, lead) in self._frames:
+                continue
+            mm = self._to_memmap(f"r{run_ts}_l{lead}", arr)
+            self._frames[(run_ts, lead)] = mm
+            added_precip += 1
+        if aug_snow is not None:
+            for lead, snow_arr in aug_snow.items():
+                if (run_ts, lead) in self._snow_masks:
+                    continue
+                # Skip snow files for leads whose precip frame didn't
+                # land (couldn't happen given the interpolator output
+                # mirrors precip, but defensive).
+                if (run_ts, lead) not in self._frames:
+                    continue
+                snow_uint8 = (
+                    snow_arr.astype(np.uint8)
+                    if snow_arr.dtype != np.uint8
+                    else snow_arr
+                )
+                mm = self._to_memmap(
+                    f"r{run_ts}_l{lead}_snow", snow_uint8,
+                )
+                self._snow_masks[(run_ts, lead)] = mm
+
+        return added_precip
 
     async def _fetch_accum(
         self, run: datetime, step_hour: int, client: httpx.AsyncClient,

@@ -14,6 +14,8 @@ pytestmark = pytest.mark.wrf_smn
 from librewxr.data.wrf_smn_grid import (
     BRACKET_INTERVAL_SECONDS,
     CYCLE_INTERVAL_SECONDS,
+    SOURCE_STEP_SECONDS,
+    STORED_INTERVAL_SECONDS,
     WRF_SMN_GRID_HEIGHT,
     WRF_SMN_GRID_WIDTH,
     WRF_SMN_LA1_SOUTH,
@@ -352,13 +354,24 @@ class TestAccumulationDiff:
 # ── Run picking ───────────────────────────────────────────────────────
 
 
+@pytest.fixture
+def hourly_brackets(monkeypatch):
+    """Force the legacy hourly bracket behaviour for tests that inject
+    frames at hourly spacing only.
+
+    Post-interpolation behaviour gets its own dedicated test classes.
+    """
+    from librewxr.config import settings as _settings
+    monkeypatch.setattr(_settings, "regional_interpolation", False)
+
+
 class TestPickRun:
     def test_no_frames_returns_none(self):
         grid = WRFSMNGrid()
         ts = int(datetime(2026, 5, 8, 12, tzinfo=timezone.utc).timestamp())
         assert grid._pick_run(ts) is None
 
-    def test_returns_run_only_when_bracket_loaded(self):
+    def test_returns_run_only_when_bracket_loaded(self, hourly_brackets):
         grid = WRFSMNGrid()
         run_ts = int(
             datetime(2026, 5, 8, 6, tzinfo=timezone.utc).timestamp()
@@ -372,7 +385,7 @@ class TestPickRun:
         grid._frames[(run_ts, 4 * 3600)] = fake
         assert grid._pick_run(query_ts) == run_ts
 
-    def test_falls_back_to_older_run_when_freshest_incomplete(self):
+    def test_falls_back_to_older_run_when_freshest_incomplete(self, hourly_brackets):
         grid = WRFSMNGrid()
         old_ts = int(datetime(2026, 5, 8, 0, tzinfo=timezone.utc).timestamp())
         new_ts = int(datetime(2026, 5, 8, 6, tzinfo=timezone.utc).timestamp())
@@ -450,7 +463,7 @@ def _inject_frame_and_snow(
 class TestSnowMask:
     """WRFSMNGrid.get_snow_mask end-to-end behaviour."""
 
-    def test_uniform_snow_returns_true_in_domain(self):
+    def test_uniform_snow_returns_true_in_domain(self, hourly_brackets):
         grid = WRFSMNGrid()
         run = int(datetime(2026, 5, 8, 12, tzinfo=timezone.utc).timestamp())
         _inject_frame_and_snow(grid, run, 3 * 3600, snow_value=1)
@@ -489,7 +502,7 @@ class TestSnowMask:
         )
         assert out.tolist() == [False]
 
-    def test_lerp_bracket_majority_at_midpoint(self):
+    def test_lerp_bracket_majority_at_midpoint(self, hourly_brackets):
         grid = WRFSMNGrid()
         run = int(datetime(2026, 5, 8, 12, tzinfo=timezone.utc).timestamp())
         _inject_frame_and_snow(grid, run, 3 * 3600, snow_value=0)  # L0: rain
@@ -527,7 +540,7 @@ class TestSnowMaskPersistence:
     """Snow masks are atomic-write parallel files alongside precip frames."""
 
     @pytest.mark.asyncio
-    async def test_snow_mask_round_trips_through_disk(self, tmp_path):
+    async def test_snow_mask_round_trips_through_disk(self, tmp_path, hourly_brackets):
         run_ts = int(datetime(2026, 5, 8, 6, tzinfo=timezone.utc).timestamp())
 
         g1 = WRFSMNGrid(cache_dir=tmp_path)
@@ -613,7 +626,7 @@ class TestSnowMaskPersistence:
 
 
 class TestChainSnowMaskWithWRFSMN:
-    def test_chain_prefers_wrf_smn_snow_inside_domain(self):
+    def test_chain_prefers_wrf_smn_snow_inside_domain(self, hourly_brackets):
         from librewxr.data.ecmwf_grid import ECMWFGrid
         from librewxr.data.ecmwf_grid import GRID_HEIGHT as IFS_H, GRID_WIDTH as IFS_W
 
@@ -644,3 +657,156 @@ class TestChainSnowMaskWithWRFSMN:
             np.array([51.5]), np.array([-0.1]), timestamp=1000000,
         )
         assert out.tolist() == [True]
+
+
+# ── Optical-flow interpolation ────────────────────────────────────────
+
+
+def _make_blob(
+    cy: int, cx: int, radius: int = 30, value: int = 150,
+) -> np.ndarray:
+    """Build a test precip grid with a circular blob at (cy, cx)."""
+    grid = np.zeros((WRF_SMN_GRID_HEIGHT, WRF_SMN_GRID_WIDTH), dtype=np.uint8)
+    ys, xs = np.ogrid[0:WRF_SMN_GRID_HEIGHT, 0:WRF_SMN_GRID_WIDTH]
+    mask = (ys - cy) ** 2 + (xs - cx) ** 2 <= radius ** 2
+    grid[mask] = value
+    return grid
+
+
+class TestInterpolateRunFrames:
+    """``_interpolate_run_frames`` fills 10-min synthetics between hourly originals."""
+
+    def test_fills_synthetic_leads_between_hourly_originals(self):
+        # Inject two hourly originals; expect 5 synthetics at 600s steps.
+        grid = WRFSMNGrid()
+        run_ts = int(datetime(2026, 5, 8, 6, tzinfo=timezone.utc).timestamp())
+        f0 = _make_blob(500, 400)
+        f1 = _make_blob(500, 450)   # blob has translated by 50 px east
+        grid._frames[(run_ts, 0)] = f0
+        grid._frames[(run_ts, 3600)] = f1
+        grid._latest_run_ts = run_ts
+
+        added = grid._interpolate_run_frames(run_ts)
+        assert added == 5  # 600, 1200, 1800, 2400, 3000
+        for lead in (600, 1200, 1800, 2400, 3000):
+            assert (run_ts, lead) in grid._frames
+            arr = grid._frames[(run_ts, lead)]
+            assert arr.shape == (WRF_SMN_GRID_HEIGHT, WRF_SMN_GRID_WIDTH)
+            assert arr.dtype == np.uint8
+
+    def test_idempotent_on_second_call(self):
+        grid = WRFSMNGrid()
+        run_ts = int(datetime(2026, 5, 8, 6, tzinfo=timezone.utc).timestamp())
+        grid._frames[(run_ts, 0)] = _make_blob(500, 400)
+        grid._frames[(run_ts, 3600)] = _make_blob(500, 450)
+        grid._latest_run_ts = run_ts
+
+        first = grid._interpolate_run_frames(run_ts)
+        second = grid._interpolate_run_frames(run_ts)
+        assert first == 5
+        assert second == 0  # nothing new to fill
+
+    def test_interpolates_snow_masks_alongside_precip(self):
+        grid = WRFSMNGrid()
+        run_ts = int(datetime(2026, 5, 8, 6, tzinfo=timezone.utc).timestamp())
+        f0 = _make_blob(500, 400)
+        f1 = _make_blob(500, 450)
+        s0 = np.ones((WRF_SMN_GRID_HEIGHT, WRF_SMN_GRID_WIDTH), dtype=np.uint8)
+        s1 = np.ones((WRF_SMN_GRID_HEIGHT, WRF_SMN_GRID_WIDTH), dtype=np.uint8)
+        grid._frames[(run_ts, 0)] = f0
+        grid._frames[(run_ts, 3600)] = f1
+        grid._snow_masks[(run_ts, 0)] = s0
+        grid._snow_masks[(run_ts, 3600)] = s1
+        grid._latest_run_ts = run_ts
+
+        grid._interpolate_run_frames(run_ts)
+        for lead in (600, 1200, 1800, 2400, 3000):
+            assert (run_ts, lead) in grid._snow_masks
+            snow = grid._snow_masks[(run_ts, lead)]
+            assert snow.dtype == np.uint8
+            assert snow.shape == (WRF_SMN_GRID_HEIGHT, WRF_SMN_GRID_WIDTH)
+
+    def test_returns_zero_when_run_has_one_or_fewer_frames(self):
+        grid = WRFSMNGrid()
+        run_ts = int(datetime(2026, 5, 8, 6, tzinfo=timezone.utc).timestamp())
+        # No frames yet
+        assert grid._interpolate_run_frames(run_ts) == 0
+        # Only one frame
+        grid._frames[(run_ts, 0)] = _make_blob(500, 400)
+        assert grid._interpolate_run_frames(run_ts) == 0
+
+    def test_skips_other_runs(self):
+        grid = WRFSMNGrid()
+        run_a = int(datetime(2026, 5, 8, 6, tzinfo=timezone.utc).timestamp())
+        run_b = run_a + 6 * 3600
+        grid._frames[(run_a, 0)] = _make_blob(500, 400)
+        grid._frames[(run_a, 3600)] = _make_blob(500, 450)
+        grid._frames[(run_b, 0)] = _make_blob(500, 400)
+        grid._frames[(run_b, 3600)] = _make_blob(500, 450)
+
+        added_a = grid._interpolate_run_frames(run_a)
+        assert added_a == 5
+        # run_b untouched until its own _interpolate_run_frames call
+        run_b_leads = [
+            lead for (r, lead) in grid._frames if r == run_b
+        ]
+        assert sorted(run_b_leads) == [0, 3600]
+
+
+class TestPostInterpolationBracket:
+    """Sample / get_snow_mask use 10-min brackets when frames are interpolated."""
+
+    def _interpolate_for_query(self, grid, run_ts):
+        """Helper: fill synthetic frames for a freshly-injected run."""
+        # _interpolate_run_frames writes via _to_memmap when called from
+        # the production fetch path, but a unit test just exercising the
+        # bracket logic doesn't need persistence — we can keep frames in
+        # memory via grid._snow_masks/_frames dicts.  The interpolator
+        # writes to disk through _to_memmap, but we never read those
+        # files; only the in-memory dict matters here.
+        grid._interpolate_run_frames(run_ts)
+
+    @pytest.mark.asyncio
+    async def test_sample_uses_10min_bracket_when_interpolation_enabled(self, tmp_path):
+        # Use a persistent cache_dir so _interpolate_run_frames can
+        # memmap-write the synthetics.
+        grid = WRFSMNGrid(cache_dir=tmp_path)
+        run_ts = int(datetime(2026, 5, 8, 6, tzinfo=timezone.utc).timestamp())
+        # Inject hourly originals via memmap so re-reads work.
+        f0 = _make_blob(500, 400)
+        f1 = _make_blob(500, 450)
+        mm0 = grid._to_memmap(f"r{run_ts}_l0", f0)
+        mm1 = grid._to_memmap(f"r{run_ts}_l3600", f1)
+        grid._frames[(run_ts, 0)] = mm0
+        grid._frames[(run_ts, 3600)] = mm1
+        grid._latest_run_ts = run_ts
+
+        # Interpolate to populate 600s synthetics.
+        grid._interpolate_run_frames(run_ts)
+
+        # Now sample at 25 min in — alpha against the 1200, 1800
+        # bracket should be 0.5 (and both stored).
+        ts = run_ts + 25 * 60
+        l0, l1, alpha = bracket_lead_seconds(ts - run_ts, 600)
+        assert l0 == 1200
+        assert l1 == 1800
+        assert alpha == pytest.approx(0.5)
+        assert (run_ts, 1200) in grid._frames
+        assert (run_ts, 1800) in grid._frames
+
+        # _pick_run finds the run via the 600s bracket lookup.
+        assert grid._pick_run(ts) == run_ts
+        await grid.close()
+
+
+class TestRegionalInterpolationDisabled:
+    """When LIBREWXR_REGIONAL_INTERPOLATION=false, behaviour reverts to hourly."""
+
+    def test_bracket_interval_is_hourly_when_disabled(self, hourly_brackets):
+        grid = WRFSMNGrid()
+        assert grid._bracket_interval() == SOURCE_STEP_SECONDS
+
+    def test_bracket_interval_is_10min_when_enabled(self):
+        grid = WRFSMNGrid()
+        # The setting defaults to True in config.py.
+        assert grid._bracket_interval() == STORED_INTERVAL_SECONDS

@@ -53,6 +53,15 @@ class Settings(BaseSettings):
     # DMI DINI, ICON-EU, and WRF-SMN.  IFS uses its native snowfall
     # ratio (``ecmwf_snow_ratio_threshold`` above) instead.
     regional_snow_temp_threshold: float = 1.5
+    # Apply the same Farneback optical-flow temporal interpolation we use
+    # on hourly IFS frames to regional NWP sources whose native cadence
+    # is also hourly (WRF-SMN, DMI DINI — others coming).  Without this,
+    # a moving precip cell appears to cross-fade between hourly bracket
+    # frames at intermediate query times, producing a visible "two faint
+    # copies" ghost.  With this on, the cell translates smoothly along
+    # the motion vectors.  Adds ~5-10 s of CPU per source per fetch
+    # cycle.  Set to False to fall back to linear time blending.
+    regional_interpolation: bool = True
     ecmwf_max_timesteps: int = 0  # 0 = auto (derived from max_frames)
     ecmwf_interpolation: bool = True  # Optical flow interpolation of IFS hourly data to 10-min frames
     # Disable IFS entirely (skip the global precipitation fallback).  Useful
