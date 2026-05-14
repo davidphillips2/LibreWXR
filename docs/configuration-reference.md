@@ -823,12 +823,12 @@ The model side is taken from the active NWP chain — **HRRR over CONUS, HRDPS o
 
 | | |
 |---|---|
-| **Default** | `radar` |
+| **Default** | `blended` |
 | **Type** | string |
 | **Values** | `radar`, `blended`, `model` |
 
-- **`radar`** — Pure radar extrapolation for the first 60 minutes. Closest to Rain Viewer behavior. Best for short-range forecasts of existing precipitation, but less reliable for cell initiation or dissipation.
-- **`blended`** — Smooth transition from radar-heavy to model-heavy. The blend curve is `0.20 + 0.80 * (1 - t)^1.4` where `t` is normalized time from 0 to 1 across the 60-min window — about 100% radar at T+0, ~82% radar at T+10 min, ~50% at T+30 min, ~20% radar at T+60 min. Spatial feathering at radar coverage boundaries prevents hard seams.
+- **`radar`** — Pure radar extrapolation for the first 60 minutes. Closest to Rain Viewer behavior. Visibly diverges from reality past ~30 minutes for fast-moving convection, since the extrapolation has no skill at cell initiation or dissipation.
+- **`blended`** (default) — Smooth transition from radar-heavy to model-heavy. The blend curve is `0.20 + 0.80 * (1 - t)^1.4` where `t` is normalized time from 0 to 1 across the 60-min window — about 100% radar at T+0, ~82% radar at T+10 min, ~50% at T+30 min, ~20% radar at T+60 min. Spatial feathering at radar coverage boundaries prevents hard seams. Leverages the regional NWP chain quality for the far end of the window.
 - **`model`** — Pure NWP forecast for all nowcast frames. Most spatially consistent but misses fine detail from recent radar observations.
 
 (Value renamed from `ifs` to `model` after the regional NWP chain shipped — the model side is no longer IFS-only.)
