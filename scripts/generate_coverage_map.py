@@ -59,6 +59,7 @@ from librewxr.data.radar_stations import (  # noqa: E402
     NEXRAD_GUAM,
     CANADA_STATIONS,
     CWA_STATIONS,
+    MSS_STATIONS,
     SNET_STATIONS,
     OPERA_STATIONS,
     RADAR_RANGE_KM,
@@ -284,6 +285,13 @@ def build_radar_sources() -> list[Source]:
     # substantial W. Pacific buffer for typhoon tracking.
     for poly in union_of_radar_circles(CWA_STATIONS, range_for("TWCOMP")):
         radar.append(Source("CWA / QPESUMS (Taiwan)", "#e377c2", poly))
+
+    # MSS Singapore — single S-band radar at Changi publishing a 480 km
+    # super-regional rain area product.  Single-station footprint that
+    # reaches across the Strait of Malacca into Peninsular Malaysia,
+    # Sumatra, and parts of W. Borneo.
+    for poly in union_of_radar_circles(MSS_STATIONS, range_for("SEACOMP")):
+        radar.append(Source("MSS (Singapore)", "#8c564b", poly))
 
     return radar
 
@@ -555,7 +563,7 @@ if __name__ == "__main__":
         sources=build_radar_sources(),
         output_path=RADAR_OUTPUT,
         title="LibreWXR — Radar Composite Coverage",
-        subtitle="NOAA MRMS · MSC Canada · MARN/SNET · OPERA Europe · CWA / QPESUMS Taiwan",
+        subtitle="NOAA MRMS · MSC Canada · MARN/SNET · OPERA Europe · CWA / QPESUMS Taiwan · MSS Singapore",
         legend_title="Radar composites",
         alpha_fill=0.40,
         hatch="//",

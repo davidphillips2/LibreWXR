@@ -133,6 +133,21 @@ REGIONS: dict[str, RegionDef] = {
         pixel_size=0.0125, group="TAIWAN",
         grid_width=921, grid_height=881,
     ),
+    # Singapore MSS 480 km super-regional radar — single S-band radar at
+    # MSS Changi (1.3521°N, 103.8198°E), 480 km range, 480x480 RGBA PNG
+    # at ~2 km/px via anonymous HTTPS at weather.gov.sg.  30-min cadence,
+    # filenames embed UTC.  Bounds are derived from Changi ± 480 km in
+    # plain equirectangular lat/lon (MSS publishes no projection params
+    # for this product; coastline alignment confirms the simple radial
+    # extent).  Covers Strait of Malacca, Peninsular Malaysia, Singapore,
+    # Sumatra, and parts of W. Borneo — region is intentionally framed
+    # as SE Asia rather than national.
+    "SEACOMP": RegionDef(
+        name="SEACOMP",
+        west=99.50, east=108.14, south=-2.97, north=5.67,
+        pixel_size=0.018, group="SOUTHEAST_ASIA",
+        grid_width=480, grid_height=480,
+    ),
 }
 
 # Group aliases: shorthand names that expand to multiple regions.
@@ -143,6 +158,7 @@ REGION_GROUPS: dict[str, list[str]] = {
     "CENTRAL_AMERICA": ["SVCOMP"],
     "CONUS": ["USCOMP"],
     "EUROPE": ["OPERA"],
+    "SOUTHEAST_ASIA": ["SEACOMP"],
     "TAIWAN": ["TWCOMP"],
     "US": ["USCOMP", "AKCOMP", "HICOMP", "PRCOMP", "GUCOMP"],
 }

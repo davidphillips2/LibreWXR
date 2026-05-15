@@ -183,6 +183,15 @@ Base URL for the Taiwan CWA QPESUMS composite bucket on AWS S3 (`cwaopendata` in
 | **Default** | `https://cwaopendata.s3.ap-northeast-1.amazonaws.com` |
 | **Type** | string |
 
+### `LIBREWXR_MSS_BASE_URL`
+
+Base URL for the Singapore MSS 480 km rain area product. Files publish anonymously as RGBA PNGs at `{base}/dpsri_480km_{YYYYMMDDHHMM}0000dBR.dpsri.png` (UTC, 30-min aligned). The historical `cdn.neaaws.com` CDN documented in older references no longer resolves (verified 2026-05-15) — origin is the only available host. Only used when `SEACOMP` or the `SOUTHEAST_ASIA` group is in `LIBREWXR_ENABLED_REGIONS`.
+
+| | |
+|---|---|
+| **Default** | `https://www.weather.gov.sg/files/rainarea/480km` |
+| **Type** | string |
+
 ---
 
 ## Regions
@@ -205,6 +214,7 @@ Which radar regions to fetch and serve. Accepts group aliases, individual region
 | `CANADA` | `CACOMP` | Canada |
 | `CENTRAL_AMERICA` | `SVCOMP` | El Salvador + W. Honduras + S. Guatemala + offshore Pacific |
 | `EUROPE` | `OPERA` | Pan-European composite (~155 radars, 24 countries) |
+| `SOUTHEAST_ASIA` | `SEACOMP` | Strait of Malacca / Peninsular Malaysia / Singapore / Sumatra / W. Borneo (MSS Changi, 480 km) |
 | `TAIWAN` | `TWCOMP` | Taiwan + W. Pacific buffer (CWA QPESUMS 7-radar composite) |
 | `ALL` | All of the above | Every available region |
 
@@ -221,6 +231,7 @@ Which radar regions to fetch and serve. Accepts group aliases, individual region
 | `SVCOMP` | El Salvador + neighbours | MARN/SNET (San Andrés, 120 km) | 409 x 342 | 0.00926° (~1km) | <1 MB |
 | `OPERA` | Europe | EUMETNET OPERA (MeteoGate S3) | 3800 x 4400 | 1km (LAEA) | ~16 MB |
 | `TWCOMP` | Taiwan + W. Pacific | CWA QPESUMS (cwaopendata S3) | 921 x 881 | 0.0125° (~1.4km) | ~3 MB |
+| `SEACOMP` | Strait of Malacca / Peninsular Malaysia / Singapore / Sumatra | MSS Singapore (Changi, 480 km) | 480 x 480 | 0.018° (~2km) | <1 MB |
 
 **Examples:**
 ```bash

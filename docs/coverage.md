@@ -38,6 +38,9 @@ box that would have implied coverage where none exists.
 | NOAA MRMS — Guam | NEXRAD WSR-88D (1) | 240 km | 2 min | ~0.0085° |
 | ECCC MSC Canada | S-band dual-pol (32) | 240 km | 6 min | ~0.025° |
 | EUMETNET OPERA | C-band (~155, 24 countries) | 300 km | 5 min | 1 km LAEA |
+| MARN El Salvador | S-band (1, San Andrés) | 120 km | 5 min | ~0.009° (~1 km) |
+| CWA Taiwan QPESUMS | S/C-band (7) | 240 km | 10 min | ~0.0125° (~1.4 km) |
+| MSS Singapore | S-band (1, Changi) | 480 km | 30 min | ~0.018° (~2 km) |
 
 MRMS and MSC ingest each other's stations along the US/Canada border,
 so the cross-border zone has overlap rather than a hard seam.

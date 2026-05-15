@@ -45,6 +45,11 @@ REGION_RADAR_RANGE: dict[str, float] = {
     # (negligible visual impact) and avoids any IFS bleed inside
     # the radar's real coverage.
     "TWCOMP": 550.0,
+    # MSS Singapore Changi radar publishes the 480 km super-regional
+    # product — full radial extent, so the default 240 km would
+    # cover less than a third of the actual product footprint and
+    # leave the global IFS layer painting over the Strait of Malacca.
+    "SEACOMP": 480.0,
 }
 
 # NEXRAD WSR-88D stations covering USCOMP (continental US).
@@ -524,6 +529,14 @@ SNET_STATIONS: list[tuple[float, float]] = [
     (13.687, -88.883),   # San Andrés
 ]
 
+# MSS Singapore — single S-band radar at MSS Changi.  Coordinates are
+# the published siting of the operational radar; the 480 km product is
+# centred on this point.  Range override above applies to the SEACOMP
+# mask.
+MSS_STATIONS: list[tuple[float, float]] = [
+    (1.3521, 103.8198),  # MSS Changi
+]
+
 # Per-region station mapping for coverage mask generation.
 # Regions not listed here skip mask generation (full-region coverage assumed).
 REGION_STATIONS: dict[str, list[tuple[float, float]]] = {
@@ -536,6 +549,7 @@ REGION_STATIONS: dict[str, list[tuple[float, float]]] = {
     "SVCOMP": SNET_STATIONS,
     "OPERA": OPERA_STATIONS,
     "TWCOMP": CWA_STATIONS,
+    "SEACOMP": MSS_STATIONS,
 }
 
 # MRMS ingests both NEXRAD (US) and ECCC (Canadian) radar networks.

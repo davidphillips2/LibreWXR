@@ -29,6 +29,7 @@ from librewxr.data.sources import (
     MRMS_PRODUCTS,
     MRMSSource,
     MSCCanadaSource,
+    MSSSource,
     OperaSource,
 )
 from librewxr.data.store import FrameStore, RadarFrame
@@ -94,15 +95,17 @@ class RadarFetcher:
         #   CANADA           → MSCCanadaSource
         #   CENTRAL_AMERICA  → MARNSource
         #   EUROPE           → OperaSource
+        #   SOUTHEAST_ASIA   → MSSSource
         #   TAIWAN           → CWASource
         #   US               → MRMSSource (when na_source uses mrms) or IEMSource
         self._sources: dict[
             str,
-            CWASource | IEMSource | MARNSource | MRMSSource | MSCCanadaSource | OperaSource,
+            CWASource | IEMSource | MARNSource | MRMSSource | MSCCanadaSource | MSSSource | OperaSource,
         ] = {}
         canada_source: MSCCanadaSource | None = None
         cwa_source: CWASource | None = None
         marn_source: MARNSource | None = None
+        mss_source: MSSSource | None = None
         iem_source: IEMSource | None = None
         opera_source: OperaSource | None = None
         # Keyed by MRMS product path so regions sharing a product (e.g.
@@ -134,6 +137,10 @@ class RadarFetcher:
                 if opera_source is None:
                     opera_source = OperaSource(settings.opera_base_url)
                 self._sources[region.name] = opera_source
+            elif region.group == "SOUTHEAST_ASIA":
+                if mss_source is None:
+                    mss_source = MSSSource(settings.mss_base_url)
+                self._sources[region.name] = mss_source
             elif region.group == "TAIWAN":
                 if cwa_source is None:
                     cwa_source = CWASource(settings.cwa_base_url)

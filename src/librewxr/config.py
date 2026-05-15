@@ -51,6 +51,11 @@ class Settings(BaseSettings):
     cwa_base_url: str = (
         "https://cwaopendata.s3.ap-northeast-1.amazonaws.com"
     )
+    # Singapore MSS 480 km radar via anonymous HTTPS at weather.gov.sg.
+    # 30-min cadence, RGBA PNG palette decode.  Region group:
+    # SOUTHEAST_ASIA.  Note: the historical ``cdn.neaaws.com`` CDN no
+    # longer resolves (verified 2026-05-15); origin is the only host.
+    mss_base_url: str = "https://www.weather.gov.sg/files/rainarea/480km"
     ecmwf_s3_bucket: str = "openmeteo"
     ecmwf_s3_region: str = "us-west-2"
     ecmwf_s3_prefix: str = "data_spatial/ecmwf_ifs"

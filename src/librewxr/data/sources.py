@@ -1339,3 +1339,220 @@ def _parse_cwa_xml(data: bytes, region: RegionDef) -> np.ndarray | None:
     grid = np.where(invalid, -33.0, grid)
     return _dbz_float_to_uint8(grid)
 
+
+# ── Singapore MSS (480 km super-regional rain area) source ──────────
+
+# MSS publishes the 480 km rain area as RGBA PNG with a 30-min cadence
+# at ``https://www.weather.gov.sg/files/rainarea/480km/`` — anonymous
+# HTTPS, no auth, no API key.  Filenames embed the UTC timestamp as
+# ``dpsri_480km_YYYYMMDDHHMM0000dBR.dpsri.png`` (12-digit timestamp
+# followed by a fixed 4-zero pad).  The historical ``cdn.neaaws.com``
+# CDN documented in older references no longer resolves
+# (verified 2026-05-15) — origin is the only available host.
+#
+# The PNG is a 480x480 grid covering a radial extent of ±480 km around
+# the MSS Changi radar (1.3521°N, 103.8198°E), in plain equirectangular
+# lat/lon (~0.018° per pixel ≈ 2 km).  Transparent pixels (alpha=0)
+# encode no-rain.  Opaque pixels sit on a discrete 31-stop palette
+# walking cyan → green → yellow → red → magenta — visually equivalent
+# to a Vaisala/EEC dBR scale (decibel rainfall rate).  We treat dBR as
+# dBZ here, since LibreWXR's color schemes are a visualisation layer
+# rather than a quantitative product.
+#
+# The palette was extracted empirically by unioning the opaque pixel
+# colours across multiple frames (2026-05-15).  Ordering is the natural
+# visual gradient (light drizzle → severe convective), and dBZ values
+# are interpolated linearly from 5 (palest cyan) to 75 (deepest
+# magenta).  If a future scan introduces a new stop, the nearest-anchor
+# lookup just snaps it to its closest neighbour — graceful degradation.
+_MSS_PALETTE: tuple[tuple[int, int, int, float], ...] = (
+    # Cyan family (lightest precipitation)
+    (0, 239, 239, 5.0),
+    (0, 255, 255, 7.3),
+    (0, 209, 213, 9.7),
+    (0, 186, 191, 12.0),
+    (0, 151, 154, 14.3),
+    (0, 131, 125, 16.7),
+    # Green family (moderate precipitation)
+    (0, 128, 69, 19.0),
+    (0, 137, 56, 21.3),
+    (0, 162, 53, 23.7),
+    (0, 183, 41, 26.0),
+    (0, 202, 17, 28.3),
+    (0, 218, 13, 30.7),
+    (0, 245, 7, 33.0),
+    (0, 255, 0, 35.3),
+    (67, 255, 65, 37.7),
+    (72, 255, 70, 40.0),
+    # Yellow → orange → red (heavy precipitation)
+    (255, 255, 59, 42.3),
+    (255, 255, 0, 44.7),
+    (255, 240, 0, 47.0),
+    (255, 220, 0, 49.3),
+    (255, 198, 0, 51.7),
+    (255, 178, 0, 54.0),
+    (255, 165, 0, 56.3),
+    (255, 138, 0, 58.7),
+    (255, 114, 0, 61.0),
+    (255, 73, 0, 63.3),
+    (255, 31, 0, 65.7),
+    # Red family (severe)
+    (229, 0, 0, 68.0),
+    (193, 0, 0, 70.3),
+    # Magenta (extreme)
+    (182, 0, 106, 72.7),
+    (210, 0, 165, 75.0),
+)
+
+# Max squared Euclidean RGB distance for nearest-anchor matching.  The
+# PNG is lossless so palette colours arrive exact — any opaque pixel
+# beyond this distance from every anchor is treated as no-data rather
+# than silently snapped.  64 = ±2.5 per channel slack, generous for
+# future palette tweaks without leaking artifacts.
+_MSS_MAX_RGB_DIST2 = 64
+
+
+class MSSSource:
+    """Singapore MSS 480 km super-regional radar source.
+
+    Single S-band radar at MSS Changi.  Files publish as anonymous
+    HTTPS RGBA PNGs at ``weather.gov.sg/files/rainarea/480km/`` on a
+    30-min cadence, clock-aligned to UTC ``:00`` and ``:30``.  Decoded
+    via discrete palette → dBZ lookup (treating dBR as dBZ for our
+    visualisation purposes).
+
+    License: Singapore Open Data Licence v1.0 (data.gov.sg / MSS /
+    NEA).  Attribution recorded in README and docs/coverage.md.
+    """
+
+    _CADENCE_SEC = 1800        # 30 minutes
+    # Native cadence is 30 min but we fetch on the 10-min radar cycle,
+    # so we round the target down to the most recent 30-min slot and
+    # walk back up to 4 prior slots (= 2 h) before giving up — covers
+    # transient outages without spamming an unfindable archive.
+    _MAX_FALLBACK_STEPS = 4
+
+    def __init__(
+        self,
+        base_url: str = "https://www.weather.gov.sg/files/rainarea/480km",
+    ):
+        self._base_url = base_url.rstrip("/")
+        self._client: httpx.AsyncClient | None = None
+
+    async def _get_client(self) -> httpx.AsyncClient:
+        if self._client is None or self._client.is_closed:
+            self._client = httpx.AsyncClient(
+                timeout=httpx.Timeout(30.0, connect=10.0),
+                follow_redirects=True,
+            )
+        return self._client
+
+    def _url_for_timestamp(self, ts: int) -> str:
+        """Build the PNG URL for a unix timestamp.
+
+        Rounds *ts* down to the nearest 30-min slot and formats as
+        ``dpsri_480km_YYYYMMDDHHMM0000dBR.dpsri.png`` (UTC, with a
+        fixed 4-zero pad after the 12-digit timestamp).
+        """
+        rounded = (ts // self._CADENCE_SEC) * self._CADENCE_SEC
+        dt = datetime.fromtimestamp(rounded, tz=timezone.utc)
+        fname = (
+            f"dpsri_480km_{dt.strftime('%Y%m%d%H%M')}0000dBR.dpsri.png"
+        )
+        return f"{self._base_url}/{fname}"
+
+    async def fetch_frame(
+        self, region: RegionDef, minutes_ago: int
+    ) -> np.ndarray | None:
+        now_rounded = (
+            int(time.time() // self._CADENCE_SEC) * self._CADENCE_SEC
+        )
+        target_ts = now_rounded - minutes_ago * 60
+        return await self._fetch_png(target_ts, region)
+
+    async def fetch_archive_frame(
+        self, region: RegionDef, dt: datetime
+    ) -> np.ndarray | None:
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return await self._fetch_png(int(dt.timestamp()), region)
+
+    async def _fetch_png(
+        self, ts: int, region: RegionDef
+    ) -> np.ndarray | None:
+        """Download and decode, falling back to older 30-min slots on 404."""
+        client = await self._get_client()
+        for step in range(self._MAX_FALLBACK_STEPS + 1):
+            url = self._url_for_timestamp(ts - step * self._CADENCE_SEC)
+            resp = await retry_get(client, url, log_name="MSS")
+            if resp is None:
+                return None
+            if resp.status_code == 200:
+                arr = _decode_mss_png(resp.content, region)
+                if arr is not None and step > 0:
+                    logger.debug(
+                        "MSS fallback succeeded at step %d: %s",
+                        step, url.rsplit("/", 1)[-1],
+                    )
+                return arr
+            if resp.status_code == 404 and step < self._MAX_FALLBACK_STEPS:
+                continue
+            logger.warning(
+                "MSS fetch failed: HTTP %d (%s)",
+                resp.status_code, url.rsplit("/", 1)[-1],
+            )
+            return None
+        return None
+
+    async def close(self) -> None:
+        if self._client and not self._client.is_closed:
+            await self._client.aclose()
+
+
+def _decode_mss_png(data: bytes, region: RegionDef) -> np.ndarray | None:
+    """Decode an MSS 480 km RGBA PNG into a uint8 dBZ array.
+
+    Transparent pixels → no-data sentinel.  Opaque pixels do a nearest-
+    anchor lookup against the 31-stop palette table; any pixel farther
+    than ``_MSS_MAX_RGB_DIST2`` from every anchor is also treated as
+    no-data (rather than being silently snapped to an unrelated stop).
+    """
+    try:
+        img = Image.open(io.BytesIO(data)).convert("RGBA")
+        arr = np.array(img, dtype=np.uint8)
+    except Exception:
+        logger.exception("Failed to decode MSS PNG")
+        return None
+
+    if arr.shape[:2] != (region.height, region.width):
+        logger.warning(
+            "Unexpected %s dimensions: %s (expected %s)",
+            region.name, arr.shape, (region.height, region.width),
+        )
+
+    h, w = arr.shape[:2]
+    # int32 — per-channel squared diffs reach ~65k and we sum three, which
+    # would overflow int16.
+    rgb = arr[..., :3].astype(np.int32)
+    alpha = arr[..., 3]
+
+    anchors_rgb = np.array(
+        [(r, g, b) for r, g, b, _ in _MSS_PALETTE], dtype=np.int32
+    )
+    anchors_dbz = np.array(
+        [dbz for *_, dbz in _MSS_PALETTE], dtype=np.float32
+    )
+
+    flat = rgb.reshape(-1, 3)
+    diffs = flat[:, None, :] - anchors_rgb[None, :, :]
+    dist2 = np.sum(diffs * diffs, axis=2)
+
+    nearest_idx = np.argmin(dist2, axis=1)
+    nearest_dist2 = dist2[np.arange(len(flat)), nearest_idx]
+
+    dbz_flat = anchors_dbz[nearest_idx]
+
+    valid = (alpha.reshape(-1) > 0) & (nearest_dist2 <= _MSS_MAX_RGB_DIST2)
+    dbz_flat = np.where(valid, dbz_flat, -33.0)
+    return _dbz_float_to_uint8(dbz_flat.reshape(h, w))
+
