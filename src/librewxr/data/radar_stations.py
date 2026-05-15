@@ -34,6 +34,17 @@ REGION_RADAR_RANGE: dict[str, float] = {
     # overstate coverage by 2× and bleed past the product's footprint
     # into Honduras / Nicaragua where no actual returns exist.
     "SVCOMP": 120.0,
+    # CWA QPESUMS publishes coverage out to its full bbox edges
+    # (~550 km east of Hualien) for typhoon tracking — empirically
+    # verified from the ``-999`` sentinel pattern in a real frame.
+    # The default 240 km under-covers by ~2× and lets IFS bleed
+    # through over the western Pacific where the radar actually has
+    # data.  550 km gives 99%+ agreement with the data's own
+    # coverage shape; a small western/southern halo over-extends
+    # into open ocean where IFS would only show very faint cells
+    # (negligible visual impact) and avoids any IFS bleed inside
+    # the radar's real coverage.
+    "TWCOMP": 550.0,
 }
 
 # NEXRAD WSR-88D stations covering USCOMP (continental US).
