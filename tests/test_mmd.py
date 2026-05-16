@@ -78,11 +78,17 @@ class TestMalaysiaRegions:
             assert r.pixel_size_y != 0.0
             assert r.pixel_size_y != r.pixel_size
 
-    def test_southeast_asia_group_is_just_malaysia(self):
-        # MET Malaysia is the sole source in this group after the MSS
-        # Singapore removal.
+    def test_southeast_asia_group_contains_malaysia(self):
+        # MET Malaysia is one of multiple peer sources in this group —
+        # PAGASA Philippines joined as a peer after the MSS Singapore
+        # removal.  Order matters because the fetcher dispatches by
+        # region name within the group, not by group membership.
         names = resolve_regions("SOUTHEAST_ASIA")
-        assert names == ["MYPENINSULAR", "MYEAST"]
+        assert "MYPENINSULAR" in names
+        assert "MYEAST" in names
+        # MYPENINSULAR precedes MYEAST so coverage rendering layers them
+        # in the same order as the upstream combined GIF.
+        assert names.index("MYPENINSULAR") < names.index("MYEAST")
 
     def test_all_includes_malaysia(self):
         names = resolve_regions("ALL")
