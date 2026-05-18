@@ -14,7 +14,7 @@ y∈[0,570)) within the combined GIF.  The vertical band between them
 (x≈[424,460]) is the South China Sea — pure water in the rendering, and
 discarded.  Each region is decoded into its own ``RegionDef``
 (``MYPENINSULAR``, ``MYEAST``) via an 18-stop palette → dBZ table; both
-regions feed the ``SOUTHEAST_ASIA`` group alongside MSS Singapore.
+regions feed the ``SOUTHEAST_ASIA`` group.
 
 The GIF carries no per-frame timestamps in any structured form (only
 burned-in chrome text), so frame times are anchored by the HTTP
@@ -39,6 +39,8 @@ from PIL import Image, ImageSequence
 
 from librewxr.data.regions import RegionDef
 from librewxr.data.retry import retry_get
+
+from .regions import REGIONS as _LOCAL_REGIONS
 
 logger = logging.getLogger(__name__)
 
@@ -443,10 +445,6 @@ class MMDSource:
         )
 
         out: dict[int, dict[str, np.ndarray]] = {}
-        # Re-resolve regions on every decode in case bounds ever change.
-        # (Cheap — just two dict reads from REGIONS.)
-        from librewxr.data.regions import REGIONS
-        regions = [REGIONS[name] for name in _MMD_SUBRECTS.keys()]
 
         for i, frame in enumerate(ImageSequence.Iterator(img)):
             if i >= len(timestamps):
@@ -454,7 +452,7 @@ class MMDSource:
             rgb = np.array(frame.convert("RGB"))
             ts = timestamps[i]
             per_region: dict[str, np.ndarray] = {}
-            for region in regions:
+            for region in _LOCAL_REGIONS:
                 per_region[region.name] = _decode_mmd_frame(rgb, region)
             out[ts] = per_region
 

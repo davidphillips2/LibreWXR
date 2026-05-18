@@ -14,10 +14,10 @@ import xarray as xr
 pytestmark = pytest.mark.sources
 
 from librewxr.data.regions import REGIONS, resolve_regions
-from librewxr.data.sources import (
+from librewxr.data.sources import _dbz_float_to_uint8
+from librewxr.sources.regional.north_america.usa.radar.mrms import (
     MRMS_EXTENTS,
     MRMSSource,
-    _dbz_float_to_uint8,
     _parse_mrms_grib2,
     _resample_mrms_to_region,
 )
@@ -225,21 +225,21 @@ class TestMRMSStations:
 
 class TestMRMSDirCache:
     def test_timestamp_regex_matches_archived_files(self):
-        from librewxr.data.sources import MRMSSource
+        from librewxr.sources.regional.north_america.usa.radar.mrms import MRMSSource
         pat = MRMSSource._TIMESTAMP_RE
         m = pat.search("MRMS_MergedReflectivityQCComposite_00.50_20260428-060041.grib2.gz")
         assert m is not None
         assert m.group(1) == "20260428-060041"
 
     def test_timestamp_regex_ignores_latest(self):
-        from librewxr.data.sources import MRMSSource
+        from librewxr.sources.regional.north_america.usa.radar.mrms import MRMSSource
         pat = MRMSSource._TIMESTAMP_RE
         m = pat.search("MRMS_MergedReflectivityQCComposite.latest.grib2.gz")
         assert m is None
 
     async def test_find_nearest_midpoint(self):
         from datetime import datetime, timezone
-        from librewxr.data.sources import MRMSSource
+        from librewxr.sources.regional.north_america.usa.radar.mrms import MRMSSource
         src = MRMSSource("https://mrms.ncep.noaa.gov/2D")
         entries = [
             (datetime(2026, 4, 28, 6, 0, 0, tzinfo=timezone.utc), "MRMS_MergedReflectivityQCComposite_00.50_20260428-060000.grib2.gz"),
@@ -257,7 +257,7 @@ class TestMRMSDirCache:
 
     async def test_find_nearest_exact_match(self):
         from datetime import datetime, timezone
-        from librewxr.data.sources import MRMSSource
+        from librewxr.sources.regional.north_america.usa.radar.mrms import MRMSSource
         src = MRMSSource("https://mrms.ncep.noaa.gov/2D")
         entries = [
             (datetime(2026, 4, 28, 6, 0, 0, tzinfo=timezone.utc), "MRMS_MergedReflectivityQCComposite_00.50_20260428-060000.grib2.gz"),
@@ -273,7 +273,7 @@ class TestMRMSDirCache:
 
     async def test_find_nearest_before_range(self):
         from datetime import datetime, timezone
-        from librewxr.data.sources import MRMSSource
+        from librewxr.sources.regional.north_america.usa.radar.mrms import MRMSSource
         src = MRMSSource("https://mrms.ncep.noaa.gov/2D")
         entries = [
             (datetime(2026, 4, 28, 6, 4, 0, tzinfo=timezone.utc), "MRMS_MergedReflectivityQCComposite_00.50_20260428-060400.grib2.gz"),
@@ -288,7 +288,7 @@ class TestMRMSDirCache:
 
     async def test_find_nearest_after_range(self):
         from datetime import datetime, timezone
-        from librewxr.data.sources import MRMSSource
+        from librewxr.sources.regional.north_america.usa.radar.mrms import MRMSSource
         src = MRMSSource("https://mrms.ncep.noaa.gov/2D")
         entries = [
             (datetime(2026, 4, 28, 6, 0, 0, tzinfo=timezone.utc), "MRMS_MergedReflectivityQCComposite_00.50_20260428-060000.grib2.gz"),

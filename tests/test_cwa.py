@@ -8,7 +8,10 @@ import pytest
 pytestmark = pytest.mark.sources
 
 from librewxr.data.regions import REGIONS, resolve_regions
-from librewxr.data.sources import CWASource, _parse_cwa_xml
+from librewxr.sources.regional.east_asia.taiwan.radar.cwa import (
+    CWASource,
+    _parse_cwa_xml,
+)
 from librewxr.tiles.coordinates import tile_overlaps_region
 
 

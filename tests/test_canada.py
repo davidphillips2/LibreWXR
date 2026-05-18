@@ -9,7 +9,7 @@ from PIL import Image
 pytestmark = pytest.mark.sources
 
 from librewxr.data.regions import REGIONS, resolve_regions
-from librewxr.data.sources import (
+from librewxr.sources.regional.north_america.canada.radar.msc_canada import (
     _MSC_CANADA_PALETTE,
     _decode_msc_canada_png,
     _mmhr_to_dbz,

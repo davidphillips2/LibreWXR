@@ -21,16 +21,19 @@ from librewxr.data.hrrr_alaska_grid import HRRRAlaskaGrid
 from librewxr.data.hrrr_grid import HRRRGrid
 from librewxr.data.icon_eu_grid import ICONEUGrid
 from librewxr.data.regions import REGIONS, RegionDef
-from librewxr.data.sources import (
-    CWASource,
-    IEMSource,
-    MARNSource,
-    MMDSource,
-    MRMS_EXTENTS,
-    MRMS_PRODUCTS,
-    MRMSSource,
+# Cross-source policy stays in this file (the discovery walker
+# populates ``self._sources`` but blending and fallback still belong
+# here).  MRMS contributes ``MRMS_EXTENTS["USCOMP"]`` for the CACOMP
+# blend mask; IEM/MSC are reached as fallback/blend partners via direct
+# instantiation when MRMS is the primary NA source.
+from librewxr.sources.regional.north_america.canada.radar.msc_canada import (
     MSCCanadaSource,
-    OperaSource,
+)
+from librewxr.sources.regional.north_america.usa.radar.iem import IEMSource
+from librewxr.sources.regional.north_america.usa.radar.mrms import (
+    MRMS_EXTENTS,
+    MRMSCompositeSource,
+    MRMSSource,
 )
 from librewxr.data.store import FrameStore, RadarFrame
 from librewxr.sources import RADAR_PROVIDERS
@@ -84,96 +87,23 @@ class RadarFetcher:
         self._cloud_task: asyncio.Task | None = None
         self._enabled_regions = [
             REGIONS[name] for name in settings.get_enabled_regions()
-            # Honour mmd_enabled (default True) — when off, drop the MET
-            # Malaysia regions even if the user's region spec is a group
-            # alias (e.g. SOUTHEAST_ASIA, ALL) that would otherwise pull
-            # them in.
-            if not (
-                name in ("MYPENINSULAR", "MYEAST")
-                and not settings.mmd_enabled
-            )
         ]
 
         self._na_source = settings.na_source
 
-        # Build a source for each enabled region based on its group
-        # and the na_source setting.
-        #
-        # Group → source class dispatch (kept alphabetical; extend by
-        # adding a new ``elif region.group == "X":`` branch below):
-        #   CANADA           → MSCCanadaSource
-        #   CENTRAL_AMERICA  → MARNSource
-        #   EUROPE           → OperaSource
-        #   SOUTHEAST_ASIA   → MMDSource (MYPENINSULAR, MYEAST)
-        #   TAIWAN           → CWASource
-        #   US               → MRMSSource (when na_source uses mrms) or IEMSource
+        # All radar source wiring now flows through the discovery
+        # registry under ``librewxr.sources``.  Each source package
+        # owns a ``radar_provider`` function that reads ``settings``
+        # and returns a contribution (or ``None`` to opt out).  The
+        # loop below applies the contribution to every enabled region
+        # it covers; ``setdefault`` lets the first provider to claim
+        # a region keep it (currently no two providers contest the
+        # same region, but the guard is cheap and keeps order
+        # deterministic).
         self._sources: dict[
             str,
-            CWASource | IEMSource | MARNSource | MMDSource | MRMSSource | MSCCanadaSource | OperaSource,
+            IEMSource | MRMSCompositeSource | MSCCanadaSource,
         ] = {}
-        canada_source: MSCCanadaSource | None = None
-        cwa_source: CWASource | None = None
-        marn_source: MARNSource | None = None
-        mmd_source: MMDSource | None = None
-        iem_source: IEMSource | None = None
-        opera_source: OperaSource | None = None
-        # Keyed by MRMS product path so regions sharing a product (e.g.
-        # USCOMP and CACOMP both use the bare CONUS path) share one
-        # MRMSSource — one HTTP client, one directory cache, one GRIB2
-        # download per fetch cycle.
-        mrms_sources: dict[str, MRMSSource] = {}
-
-        use_mrms = self._na_source in ("mrms", "mrms_fallback")
-        for region in self._enabled_regions:
-            # MRMS routes by region.name (one product path per region),
-            # so it's checked first as an override for US-group regions.
-            if use_mrms and region.name in self._MRMS_REGIONS:
-                product = MRMS_PRODUCTS[region.name]
-                if product not in mrms_sources:
-                    mrms_sources[product] = MRMSSource(
-                        settings.mrms_base_url, region_name=region.name
-                    )
-                self._sources[region.name] = mrms_sources[product]
-            elif region.group == "CANADA":
-                if canada_source is None:
-                    canada_source = MSCCanadaSource(settings.msc_canada_base_url)
-                self._sources[region.name] = canada_source
-            elif region.group == "CENTRAL_AMERICA":
-                if marn_source is None:
-                    marn_source = MARNSource(settings.marn_base_url)
-                self._sources[region.name] = marn_source
-            elif region.group == "EUROPE":
-                if opera_source is None:
-                    opera_source = OperaSource(settings.opera_base_url)
-                self._sources[region.name] = opera_source
-            elif region.group == "SOUTHEAST_ASIA":
-                # MYPENINSULAR + MYEAST both ride on MET Malaysia's
-                # combined GIF (peer regions, one HTTP fetch per cycle
-                # shared across both).  The ``mmd_enabled`` toggle is
-                # enforced upstream in ``self._enabled_regions``.
-                if mmd_source is None:
-                    mmd_source = MMDSource(
-                        settings.mmd_base_url,
-                        publish_lag_sec=settings.mmd_publish_lag_sec,
-                    )
-                self._sources[region.name] = mmd_source
-            elif region.group == "TAIWAN":
-                if cwa_source is None:
-                    cwa_source = CWASource(settings.cwa_base_url)
-                self._sources[region.name] = cwa_source
-            else:
-                # Default for US-group regions when not using MRMS.
-                if iem_source is None:
-                    iem_source = IEMSource(settings.iem_base_url)
-                self._sources[region.name] = iem_source
-
-        # Merge in sources contributed via the auto-discovery registry
-        # under ``librewxr.sources``.  Phase 0 of the refactor (2026-05-17):
-        # no source packages have been migrated yet, so this loop is a
-        # no-op.  As sources migrate in Phase 1, the legacy dispatch
-        # above is removed in the same commit each source gains a
-        # provider, so there's never a moment when both paths populate
-        # the same region.  The ``setdefault`` is belt-and-braces.
         enabled_names = {r.name for r in self._enabled_regions}
         for provider in RADAR_PROVIDERS:
             try:
@@ -187,14 +117,33 @@ class RadarFetcher:
                 if region.name in enabled_names:
                     self._sources.setdefault(region.name, contribution.instance)
 
-        # MSC blending for CACOMP: only in mrms_fallback mode.
+        # A provider returning ``None`` (e.g. ``mmd_enabled=False``) leaves
+        # its regions out of ``self._sources``.  Drop those from the working
+        # set so the fetch loop never lands on a region with no source.
+        # Legacy-elif-managed regions always have a source, so this only
+        # affects regions that have been migrated to the discovery path.
+        dropped = [
+            r.name for r in self._enabled_regions if r.name not in self._sources
+        ]
+        if dropped:
+            logger.info(
+                "Skipping regions with disabled providers: %s",
+                ", ".join(sorted(dropped)),
+            )
+            self._enabled_regions = [
+                r for r in self._enabled_regions if r.name in self._sources
+            ]
+
+        # MSC blending for CACOMP: only in mrms_fallback mode.  In this
+        # mode MRMS owns the standalone ``self._sources["CACOMP"]`` slot,
+        # so the blend partner is a separately-managed MSC instance.
         self._cacomp_msc_source: MSCCanadaSource | None = None
         if self._na_source == "mrms_fallback" and any(
             r.name == "CACOMP" for r in self._enabled_regions
         ):
-            if canada_source is None:
-                canada_source = MSCCanadaSource(settings.msc_canada_base_url)
-            self._cacomp_msc_source = canada_source
+            self._cacomp_msc_source = MSCCanadaSource(
+                settings.msc_canada_base_url
+            )
 
         # IEM fallback for all US-group MRMS regions: only in mrms_fallback.
         self._iem_fallback: IEMSource | None = None

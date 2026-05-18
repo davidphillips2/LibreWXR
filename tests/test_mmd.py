@@ -1,6 +1,11 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (C) 2026 Joshua Kimsey
-"""Tests for the MET Malaysia radar source (data/mmd_source.py)."""
+"""Tests for the MET Malaysia radar source.
+
+Lives under ``sources/regional/southeast_asia/malaysia/radar/mmd/``
+since the 2026-05-17 Phase 1 migration; previously
+``data/mmd_source.py``.
+"""
 import asyncio
 import io
 from datetime import datetime, timezone
@@ -11,7 +16,7 @@ from PIL import Image
 
 pytestmark = pytest.mark.sources
 
-from librewxr.data.mmd_source import (
+from librewxr.sources.regional.southeast_asia.malaysia.radar.mmd.source import (
     MMDSource,
     _decode_mmd_frame,
     _decode_mmd_palette,
@@ -80,9 +85,12 @@ class TestMalaysiaRegions:
 
     def test_southeast_asia_group_is_just_malaysia(self):
         # MET Malaysia is the sole source in this group after the MSS
-        # Singapore removal.
+        # Singapore removal.  Sources-refactor discovery sorts regions
+        # alphabetically within each group, so MYEAST precedes
+        # MYPENINSULAR in the resolved list.
         names = resolve_regions("SOUTHEAST_ASIA")
-        assert names == ["MYPENINSULAR", "MYEAST"]
+        assert sorted(names) == ["MYEAST", "MYPENINSULAR"]
+        assert set(names) == {"MYEAST", "MYPENINSULAR"}
 
     def test_all_includes_malaysia(self):
         names = resolve_regions("ALL")
@@ -462,7 +470,7 @@ class TestMMDSource:
         async def fake_retry_get(*args, **kwargs):
             return _FakeResp(404)
 
-        import librewxr.data.mmd_source as mmd_mod
+        import librewxr.sources.regional.southeast_asia.malaysia.radar.mmd.source as mmd_mod
         original = mmd_mod.retry_get
         mmd_mod.retry_get = fake_retry_get
         try:
@@ -495,7 +503,7 @@ class TestMMDSource:
                 200, content=gif, headers={"Last-Modified": lm_header},
             )
 
-        import librewxr.data.mmd_source as mmd_mod
+        import librewxr.sources.regional.southeast_asia.malaysia.radar.mmd.source as mmd_mod
         original = mmd_mod.retry_get
         mmd_mod.retry_get = fake_retry_get
         try:

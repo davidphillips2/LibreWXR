@@ -10,7 +10,7 @@ from PIL import Image
 pytestmark = pytest.mark.sources
 
 from librewxr.data.regions import REGIONS, resolve_regions
-from librewxr.data.sources import (
+from librewxr.sources.regional.central_america.el_salvador.radar.marn import (
     MARNSource,
     _decode_marn_png,
     _MARN_DBZ_MAX,
