@@ -33,30 +33,30 @@ Sources that shipped and were later removed are recorded in [Reverted and remove
 
 Two complementary US sources, selectable via `LIBREWXR_NA_SOURCE`:
 
-- **MRMS** (default) — NCEP Multi-Radar Multi-Sensor, GRIB2 MergedBaseReflectivityQC at 0.01° (~1 km) on CONUS plus region-aware products for Alaska, Hawaii, Caribbean, Guam. Decoded with eccodes; no GDAL dependency. Anonymous HTTPS at `mrms.ncep.noaa.gov`. US Government public domain.
+- **MRMS** (default) — NCEP Multi-Radar Multi-Sensor, GRIB2 MergedBaseReflectivityQC at 0.01° (\~1 km) on CONUS plus region-aware products for Alaska, Hawaii, Caribbean, Guam. Decoded with eccodes; no GDAL dependency. Anonymous HTTPS at `mrms.ncep.noaa.gov`. US Government public domain.
 - **IEM NEXRAD** — Iowa Environmental Mesonet N0Q composites, palette-indexed PNG, uint8 dBZ encoding. Anonymous. Legacy / fallback source.
 
 Regions covered by both: USCOMP, AKCOMP, HICOMP, PRCOMP, GUCOMP. Per-region MRMS products are routed through separate per-product source instances inside the same package.
 
 ### Canada — ECCC MSC GeoMet WMS
 
-Region: CACOMP. Source: MSC GeoMet WMS, `RADAR_1KM_RRAI` layer with `Radar-Rain_Dis-14colors` discrete style. Pre-coloured PNG only (no raw data access) — decoded via palette reverse-engineering back to mm/h, then converted to dBZ via Marshall-Palmer Z-R. Resolution: 0.025° (~2.5 km), ~3560×1720 grid. Anonymous. Selectable independently from the US source via `LIBREWXR_CA_SOURCE`.
+Region: CACOMP. Source: MSC GeoMet WMS, `RADAR_1KM_RRAI` layer with `Radar-Rain_Dis-14colors` discrete style. Pre-coloured PNG only (no raw data access) — decoded via palette reverse-engineering back to mm/h, then converted to dBZ via Marshall-Palmer Z-R. Resolution: 0.025° (\~2.5 km), \~3560×1720 grid. Anonymous. Selectable independently from the US source via `LIBREWXR_CA_SOURCE`.
 
 ### Europe — OPERA Pan-European CIRRUS Composite
 
-Region: OPERA (~155 radars across 24 countries). Source: EUMETNET OPERA CIRRUS MAX reflectivity via MeteoGate/Cloudferro S3 — anonymous, no key required. ODIM HDF5, float64 dBZ. Resolution 3800×4400 at 1 km, LAEA projection. 5-minute cadence, rolling 24-hour archive. Sentinels: nodata `-9999000.0`, undetect `-8888000.0` (both map to 0 in uint8, so clear sky falls through to the NWP chain). URL pattern: `https://s3.waw3-1.cloudferro.com/openradar-24h/YYYY/MM/DD/OPERA/COMP/OPERA@YYYYMMDDTHHMM@0@DBZH.h5`.
+Region: OPERA (\~155 radars across 24 countries). Source: EUMETNET OPERA CIRRUS MAX reflectivity via MeteoGate/Cloudferro S3 — anonymous, no key required. ODIM HDF5, float64 dBZ. Resolution 3800×4400 at 1 km, LAEA projection. 5-minute cadence, rolling 24-hour archive. Sentinels: nodata `-9999000.0`, undetect `-8888000.0` (both map to 0 in uint8, so clear sky falls through to the NWP chain). URL pattern: `https://s3.waw3-1.cloudferro.com/openradar-24h/YYYY/MM/DD/OPERA/COMP/OPERA@YYYYMMDDTHHMM@0@DBZH.h5`.
 
 The legal lever that opened European radar data is the **EU High Value Datasets regulation (EU 2023/138)**, not WMO policy — it legally requires European meteorological data to be free, open-licensed, and API-accessible.
 
 ### El Salvador — MARN/SNET San Andrés
 
-Region: SVCOMP (group `CENTRAL_AMERICA`). Single S-band radar at San Andrés, 120 km product (`esar82/Images/`) from the anonymous GCS bucket `radar-images-sv`. Format: PNG with continuous HSV-style hue gradient (green → cyan → blue → magenta on the saturated outer ring); decoded by arc-detect + linear hue → dBZ map. Resolution 409×342 at ~1 km, regular lat/lon. 5-minute cadence, ~24-hour bucket retention. Filenames embed local time (UTC-6, no DST). License: MARN explicitly permits reproduction with citation.
+Region: SVCOMP (group `CENTRAL_AMERICA`). Single S-band radar at San Andrés, 120 km product (`esar82/Images/`) from the anonymous GCS bucket `radar-images-sv`. Format: PNG with continuous HSV-style hue gradient (green → cyan → blue → magenta on the saturated outer ring); decoded by arc-detect + linear hue → dBZ map. Resolution 409×342 at \~1 km, regular lat/lon. 5-minute cadence, \~24-hour bucket retention. Filenames embed local time (UTC-6, no DST). License: MARN explicitly permits reproduction with citation.
 
 **Implementation surprise worth flagging for any contributor working a similar product**: the published legend image (`escalaPropuesta2013SNEThW_.png`) is for the 60 km multi-radar composite, NOT for `esar82`. The actual 120 km product uses a smooth HSV gradient with no discrete bins. Decoding against the legend's discrete palette yields garbage; decoding against the hue arc yields the right answer.
 
 ### Taiwan — CWA QPESUMS Composite
 
-Region: TWCOMP (group `TAIWAN`). Source: CWA O-A0059-001 / 雷達合成回波 on the anonymous AWS S3 bucket `cwaopendata` in `ap-northeast-1`. UTF-8 XML with raw dBZ as comma-separated scientific-notation floats inside a single `<content>` element. Resolution 921×881 at 0.0125° (~1.4 km), regular lat/lon. 10-minute cadence. Coverage: Taiwan plus a substantial western Pacific buffer for typhoon tracking. License: data.gov.tw Open Government Data License v1.0, attribution required.
+Region: TWCOMP (group `TAIWAN`). Source: CWA O-A0059-001 / 雷達合成回波 on the anonymous AWS S3 bucket `cwaopendata` in `ap-northeast-1`. UTF-8 XML with raw dBZ as comma-separated scientific-notation floats inside a single `<content>` element. Resolution 921×881 at 0.0125° (\~1.4 km), regular lat/lon. 10-minute cadence. Coverage: Taiwan plus a substantial western Pacific buffer for typhoon tracking. License: data.gov.tw Open Government Data License v1.0, attribution required.
 
 URL pattern: `https://cwaopendata.s3.ap-northeast-1.amazonaws.com/history/Observation/{YYYYMMDDHHMM}compref_mosaic.xml` — **no separator dot** between timestamp and product name. The interleaved QPESUMS gauge keys *do* use a dot; easy to mix up. Filename timestamps are Taipei local (UTC+8, no DST). Row order is south-to-north (first value is SW corner) — vertical flip on decode. Datum is TWD67 (sub-pixel offset vs WGS84 at 1.4 km; treated as lat/lon).
 
@@ -64,11 +64,11 @@ URL pattern: `https://cwaopendata.s3.ap-northeast-1.amazonaws.com/history/Observ
 
 Regions: MYPENINSULAR (Peninsular Malaysia + N. Sumatra + Singapore via KLIA's 240 km Doppler reach) and MYEAST (Borneo + Brunei), both in group `SOUTHEAST_ASIA`. Source: Jabatan Meteorologi Malaysia national radar composite via anonymous HTTPS at `api.met.gov.my`.
 
-Format: animated GIF89a, 1352×570, 6 frames at 10-min cadence (~60 min of backfill per fetch). Decoded via 18-stop palette → dBZ table (Marshall-Palmer Z = 200·R^1.6 applied to the legend's mm/h stops). Frames cropped to two sub-rectangles. Combined bounding box 96.92–121.19°E × -1.48–9.18°N, split across the South China Sea gap. Single fixed URL `https://api.met.gov.my/static/images/radar-latest.gif` — no per-frame paths. License: CC-BY-4.0 (METMalaysia / api.met.gov.my), attribution required.
+Format: animated GIF89a, 1352×570, 6 frames at 10-min cadence (\~60 min of backfill per fetch). Decoded via 18-stop palette → dBZ table (Marshall-Palmer Z = 200·R^1.6 applied to the legend's mm/h stops). Frames cropped to two sub-rectangles. Combined bounding box 96.92–121.19°E × -1.48–9.18°N, split across the South China Sea gap. Single fixed URL `https://api.met.gov.my/static/images/radar-latest.gif` — no per-frame paths. License: CC-BY-4.0 (METMalaysia / api.met.gov.my), attribution required.
 
 **Two implementation gotchas worth documenting for contributors hitting similar products:**
 
-1. **Timestamp anchoring**: the GIF carries no per-frame timestamps (only burned-in chrome text). MET publishes each 10-min slot ~11 min after its real data time, so anchoring the "newest" frame on the real publication time leaves the current slot perpetually empty in the served frames. The fix is to relabel frames against the current wall-clock 10-min slot rather than the upstream timestamp. Configurable lag defaults to 600 s.
+1. **Timestamp anchoring**: the GIF carries no per-frame timestamps (only burned-in chrome text). MET publishes each 10-min slot \~11 min after its real data time, so anchoring the "newest" frame on the real publication time leaves the current slot perpetually empty in the served frames. The fix is to relabel frames against the current wall-clock 10-min slot rather than the upstream timestamp. Configurable lag defaults to 600 s.
 2. **State-boundary gaps**: a burned-in state-boundary line leaves hairline gaps in the decoded reflectivity. Post-decode morphological close fills them.
 
 Vendor credit visible in the burned-in chrome ("Rainbow 5 / LEONARDO Germany GmbH") is a tool credit, not a license obligation.
@@ -87,13 +87,13 @@ The call was to drop the smaller-domain source rather than special-case the seam
 
 **Lesson**: when a new source overlaps an existing one, the question isn't just "is the new data better?" — it's "do they agree at the seam?" If they don't, picking one and removing the other is cleaner than trying to feather across them. Same posture as the NWP chain's feathered hand-off, just applied to radar.
 
-If a sharper Singapore-specific layer is wanted again, the path is documented: anonymous HTTPS at `https://www.weather.gov.sg/files/rainarea/50km/v2/dpsri_70km_{YYYYMMDDHHMM}0000dBR.dpsri.png`, RGBA PNG 217×120 at ~0.5 km/px, Singapore Open Data Licence v1.0. The composite-with-MMD seam is the open design problem that blocks re-adoption.
+If a sharper Singapore-specific layer is wanted again, the path is documented: anonymous HTTPS at `https://www.weather.gov.sg/files/rainarea/50km/v2/dpsri_70km_{YYYYMMDDHHMM}0000dBR.dpsri.png`, RGBA PNG 217×120 at \~0.5 km/px, Singapore Open Data Licence v1.0. The composite-with-MMD seam is the open design problem that blocks re-adoption.
 
 ### Philippines — PAGASA PANAHON (shipped and reverted 2026-05-16)
 
 Shipped as `PHCOMP` in group `SOUTHEAST_ASIA` on 2026-05-16 and reverted later the same day. The technical implementation worked; the upstream product was the problem.
 
-PAGASA publishes a single 2048×2048 PNG covering the whole archipelago, but the image carries data only inside each station's range circle. Three of the eight contributing radars (Echague, Kabacan, Panabo) publish at ~80 km rather than the assumed 240 km, leaving the coverage mask claiming radar coverage in areas with no data. This rendered as a sharp black hole over northern Luzon where the mask blocked the IFS fallback. Across a typical frame only ~2065 pixels (~0.05% of the grid) carried real returns.
+PAGASA publishes a single 2048×2048 PNG covering the whole archipelago, but the image carries data only inside each station's range circle. Three of the eight contributing radars (Echague, Kabacan, Panabo) publish at \~80 km rather than the assumed 240 km, leaving the coverage mask claiming radar coverage in areas with no data. This rendered as a sharp black hole over northern Luzon where the mask blocked the IFS fallback. Across a typical frame only \~2065 pixels (\~0.05% of the grid) carried real returns.
 
 **Lesson**: "national mosaic" framing in upstream documentation can be misleading when stations publish at heterogeneous ranges. The negative-space behaviour (where the source claims coverage but has no data) matters as much as the positive-space behaviour, because LibreWXR's coverage mask suppresses the fallback NWP chain inside the claimed area. PAGASA's product is technically a national composite; visually it's eight disjoint circles.
 
@@ -107,7 +107,7 @@ Validated against the upstream endpoints. License and access path are clear. Imp
 
 ### Cayman Islands — CINWS
 
-Source: weather.gov.ky CDN, anonymous, no WAF. URL pattern `https://www.weather.gov.ky/cdn/assets/images/radar/{product}/{TIMESTAMP}{type}.jpg`. Timestamp format `YYYYMMDDHHMMSSSS` (UTC, clock-aligned, ~5-minute cadence). JPEG 1276×1000 RGB, ~65 KB per frame.
+Source: weather.gov.ky CDN, anonymous, no WAF. URL pattern `https://www.weather.gov.ky/cdn/assets/images/radar/{product}/{TIMESTAMP}{type}.jpg`. Timestamp format `YYYYMMDDHHMMSSSS` (UTC, clock-aligned, \~5-minute cadence). JPEG 1276×1000 RGB, \~65 KB per frame.
 
 Products available include PPI 400 km (largest coverage — recommended primary), CAPPI 250 km, 40 nautical-mile zoom, DPSRI rainfall rate, and a Sister Islands product. The DPSRI naming and file-name suffixes (`dBZ.cappi.jpg`, `dBZ.ppi.jpg`, `dBR.dpsri.jpg`) suggest the same vendor product line as the old Singapore MSS feed — Selex/Leonardo. Bermuda likely runs the same family.
 
@@ -118,13 +118,13 @@ Products available include PPI 400 km (largest coverage — recommended primary)
 
 ### Bermuda — BWS
 
-Source: weather.bm, anonymous. URL pattern `https://www.weather.bm/images/Radar/CurrentRadarAnimation_500km_dBZ_0deg/{YYYY-MM-DD-HHMM}_500km_dBz_0deg.png` (note mixed casing: `dBZ` in the directory path, `dBz` in the filename). Frame manifest exposed at `https://www.weather.bm/tools/graphics.asp?name=500KM%20PPI` — 5 frames, ~30 min trail, page-scrape pattern. Format: PNG 1032×700, 8-bit RGB, **6-min cadence**, UTC timestamps.
+Source: weather.bm, anonymous. URL pattern `https://www.weather.bm/images/Radar/CurrentRadarAnimation_500km_dBZ_0deg/{YYYY-MM-DD-HHMM}_500km_dBz_0deg.png` (note mixed casing: `dBZ` in the directory path, `dBz` in the filename). Frame manifest exposed at `https://www.weather.bm/tools/graphics.asp?name=500KM%20PPI` — 5 frames, \~30 min trail, page-scrape pattern. Format: PNG 1032×700, 8-bit RGB, **6-min cadence**, UTC timestamps.
 
-Centre at BWS site ~32.36 °N, -64.69 °W; 500 km range ≈ 28–37 °N × -70 to -59 °W. Projection is almost certainly azimuthal-equidistant centred on the radar (the Selex/Leonardo default). The image has burned-in Bermuda outline + coordinate grid, which should make ground-truthing trivial. Product is dBZ — no Z-R inversion needed.
+Centre at BWS site \~32.36 °N, -64.69 °W; 500 km range ≈ 28–37 °N × -70 to -59 °W. Projection is almost certainly azimuthal-equidistant centred on the radar (the Selex/Leonardo default). The image has burned-in Bermuda outline + coordinate grid, which should make ground-truthing trivial. Product is dBZ — no Z-R inversion needed.
 
 License: permissive with attribution. BWS disclaimer explicitly permits redistribution of "imagery" provided users acknowledge BWS as the source and quote issue time and validity. The same disclaimer prohibits "deep links, image links, or trademarked 'hot' links without written agreement" — LibreWXR's pattern is server-side fetch + re-render rather than hotlinking, but a courtesy confirmation to BWS is appropriate.
 
-**Coverage value**: this is the largest single gap-fill in the entire radar backlog. USCOMP drops off ~80 km offshore, OPERA is ~3500 km east, MRMS Caribbean (PRCOMP) is ~1500 km south. Bermuda fills a unique slice of the western Atlantic on the hurricane track.
+**Coverage value**: this is the largest single gap-fill in the entire radar backlog. USCOMP drops off \~80 km offshore, OPERA is \~3500 km east, MRMS Caribbean (PRCOMP) is \~1500 km south. Bermuda fills a unique slice of the western Atlantic on the hurricane track.
 
 Open questions before implementation: exact palette / dBZ scale (legend needed — sample a precip frame or correspond with BWS); backfill depth (page exposes only 5 frames; older timestamps return 404); projection confirmation. Adding a new `proj="aeqd"` branch to the `RegionDef` machinery is the largest scoped change relative to the existing source pattern.
 
@@ -142,7 +142,7 @@ License: **Etalab Licence Ouverte v2.0** with attribution "Météo-France" — t
 
 **Why this is uniquely valuable**: pairs radar + high-res NWP across the same domain. First source to do so outside CONUS and Europe, since AROME Antilles is already running for the model side. Three regions (Guadeloupe, Martinique, French Guiana) are otherwise covered only by the IFS global base.
 
-Open questions: JWT lifetime under sustained use (needs probing across hours — short-lived sessions need a refresh cycle, long-lived sessions can bootstrap once at startup); time-archive depth (capabilities suppresses the list; the viewer animation length suggests ~1–2 h); courtesy email to `contact.api@meteo.fr` for a paper trail on the `rwg.meteofrance.com` endpoint's specific terms.
+Open questions: JWT lifetime under sustained use (needs probing across hours — short-lived sessions need a refresh cycle, long-lived sessions can bootstrap once at startup); time-archive depth (capabilities suppresses the list; the viewer animation length suggests \~1–2 h); courtesy email to `contact.api@meteo.fr` for a paper trail on the `rwg.meteofrance.com` endpoint's specific terms.
 
 ### Argentina — SMN / SINARAME
 
@@ -158,14 +158,14 @@ Coverage value: significant. WRF-SMN already covers Argentina + Chile + Uruguay 
 
 ### Mexico — CONAGUA SMN
 
-16-station network with per-station rendered GIF images, no national mosaic. Comparable in shape to the Canada source (palette reverse + Marshall-Palmer Z-R) but with multi-station compositing layered on top — effort estimated at ~3–5× a single-region Tier 1.
+16-station network with per-station rendered GIF images, no national mosaic. Comparable in shape to the Canada source (palette reverse + Marshall-Palmer Z-R) but with multi-station compositing layered on top — effort estimated at \~3–5× a single-region Tier 1.
 
 Source plumbing (no auth, but SSL cert chain is broken on the host — needs `-k` / cert pinning):
 - File listing: `https://smn.conagua.gob.mx/tools/PHP/RDA/static/php/RDA_repository.php?dir=ecos&type=json`
 - Image base: `https://smn.conagua.gob.mx/tools/GUI/visor_radares_v3/ecos/{filename}`
-- Per-station config: `radarsDB.json` (~13 MB) carries `radarsInfo` (16 radars), per-product `map.bounds`, `range` km, etc.
+- Per-station config: `radarsDB.json` (\~13 MB) carries `radarsInfo` (16 radars), per-product `map.bounds`, `range` km, etc.
 
-Filename pattern: `{STATION}_{PRODUCT}_{MOMENT}_XXX_PXXX_YYYYMMDD_HHMMSS.gif`. Per-station cadence ~3–5 minutes, not clock-aligned; round to nearest 10-min boundary. SMN does **not** publish a single national composite — the `config.mosaico` entry in `radarsDB.json` is a Leaflet viewer view, not a product. A national MXCOMP would have to be built by max-pooling the 16 per-station rectangles onto a unified grid.
+Filename pattern: `{STATION}_{PRODUCT}_{MOMENT}_XXX_PXXX_YYYYMMDD_HHMMSS.gif`. Per-station cadence \~3–5 minutes, not clock-aligned; round to nearest 10-min boundary. SMN does **not** publish a single national composite — the `config.mosaico` entry in `radarsDB.json` is a Leaflet viewer view, not a product. A national MXCOMP would have to be built by max-pooling the 16 per-station rectangles onto a unified grid.
 
 **Blocker**: no open-data licence statement on the smn.conagua endpoints. The NCAR EOL archive of past SMN radar (`https://data.eol.ucar.edu/dataset/82.093`) is research-use-only and explicitly not redistributable. Direct confirmation from `ventanillaunica.smn@conagua.gob.mx` is needed before shipping. Rain Viewer lists SMN as a source, but Rain Viewer's terms aren't AGPL-compatible and they may have a private agreement.
 
@@ -173,7 +173,7 @@ Format gotcha: palette table is not documented. Capture it from a representative
 
 ### Thailand — TMD
 
-National composite at `weather.tmd.go.th/composite/index_composite.html`, driven by the HAniS animation framework. The radar layer is a transparent overlay (Singapore-style), not baked into a basemap — the architectural prerequisite for being usable. Frames composed from four layered PNGs at 1173×1668 RGBA, of which only `images/zr{NNNN}.png` (~108 KB, ~525 distinct RGBA colours) is the radar data.
+National composite at `weather.tmd.go.th/composite/index_composite.html`, driven by the HAniS animation framework. The radar layer is a transparent overlay (Singapore-style), not baked into a basemap — the architectural prerequisite for being usable. Frames composed from four layered PNGs at 1173×1668 RGBA, of which only `images/zr{NNNN}.png` (\~108 KB, \~525 distinct RGBA colours) is the radar data.
 
 Frame manifest at `images_composite.list` — 24 frames at **15-minute cadence**, 6 hours of rolling archive. Indexed filenames rotate; the manifest is the authoritative index → timestamp map. Always parse it first.
 
@@ -195,7 +195,7 @@ URL extraction resolved 2026-05-15: `https://www.bahrainweather.gov.bh/o/ibl-ima
 
 1. **JPEG-RGB, not PNG-palette**. DCT compression smears RGB triplets across block boundaries, so the standard nearest-colour palette decode is lossy. Fuzzy colour matching with tolerance is needed.
 2. **Burned-in coastlines and country borders**. Vector overlay (thin white-grey lines) is rendered into each JPEG, not delivered as a separate layer. Decoding masks the overlay pixels as phantom dBZ unless explicitly masked — and the mask carves no-data holes along every coast.
-3. **No bounds published**. Image is approximately Mercator centred ~25°N, 53°E with rough bbox ~14–32°N × 42–62°E, but the bbox must be fitted empirically.
+3. **No bounds published**. Image is approximately Mercator centred \~25°N, 53°E with rough bbox \~14–32°N × 42–62°E, but the bbox must be fitted empirically.
 4. **No colormap legend visible in dry-region frames**. Most of the GCC is desert with very few radar returns in normal conditions; legend sampling has to wait for a rain event or guess from IBL Visual Weather's stock palette.
 5. **License unclear**. Footer reads "© 2025 Ministry of Transportation and Telecommunications Kingdom of Bahrain"; portal vendor is IBL Software Engineering (Slovakia). No open-data statement.
 
@@ -209,12 +209,12 @@ If the email goes nowhere, this sits at the back of Tier 2 behind cleaner-format
 
 **Path B (CPTEC/INPE sigma reverse-engineering)** is the only acceptable path. The viewer at `sigma.cptec.inpe.br/radar/` aggregates data from all five Brazilian radar networks (INPE + DECEA + IPMet + CEMADEN + CENSIPAM) without an auth gate. Internal plumbing:
 
-- Product catalog: `https://s0.cptec.inpe.br/webdsa/json_dsa/dados_radar.json` (~756 KB). Keyed by 4-digit `idSubprod` codes; each entry has `filePath`, `fileDate`, `fileTime`, and a fully-qualified `url` to the PNG.
+- Product catalog: `https://s0.cptec.inpe.br/webdsa/json_dsa/dados_radar.json` (\~756 KB). Keyed by 4-digit `idSubprod` codes; each entry has `filePath`, `fileDate`, `fileTime`, and a fully-qualified `url` to the PNG.
 - Image CDN: `https://satelite.cptec.inpe.br/repositorio7/{radar}/cappi/maxcappi/YYYY/MM/R{station_id}_{YYYYMMDDHHMM}.png` — anonymous, no auth.
 
 **Why this is back of Tier 2 and not Tier 1:**
 
-- Per-radar PNGs, not a national mosaic — despite the viewer's appearance, the underlying data is per-station. A national composite would have to be built from ~24 stations, comparable to Mexico's complexity.
+- Per-radar PNGs, not a national mosaic — despite the viewer's appearance, the underlying data is per-station. A national composite would have to be built from \~24 stations, comparable to Mexico's complexity.
 - No documented URL contract — `dados_radar.json` and `repositorio7/...` paths are the viewer's internal plumbing, not a published API. More fragile than Mexico (which at least has documented per-station bounds in `radarsDB.json`).
 - Sample inspection has shown 2018-era timestamps in the top entries of the catalog. Either deep-archive priority or stale catalog — must verify current data freshness as the very first implementation step.
 - Whether each per-radar PNG carries a transparent radar overlay or a basemap-baked layer hasn't been confirmed.
@@ -227,7 +227,7 @@ Defensible to leave Brazil at the back of Tier 2 indefinitely — Argentina (sin
 
 Anonymous AWS S3 bucket `s3-radaresideam` in `us-east-1`. AWS Open Data Sponsorship Program — clean license. Four radars currently active (Barrancabermeja, Bogota, Guaviare, santa_elena). Format: Sigmet IRIS RAW (.RAWXXXX) volumetric scans — best raw data quality of any source surveyed; this is what `pyart` / `xradar` consume natively for research-grade work. Archive depth: 2018 → present.
 
-**Blocker for the real-time pipeline**: ~24-hour publication delay. Querying today's directory returns zero keys; querying two days back returns data with all `LastModified` timestamps at ~04:04 UTC the following day. Useless for live precipitation overlay where users see "current" weather, but **Tier 1 for an archive/research mode** if LibreWXR ever adds one.
+**Blocker for the real-time pipeline**: \~24-hour publication delay. Querying today's directory returns zero keys; querying two days back returns data with all `LastModified` timestamps at \~04:04 UTC the following day. Useless for live precipitation overlay where users see "current" weather, but **Tier 1 for an archive/research mode** if LibreWXR ever adds one.
 
 If revisited: trigger is IDEAM shortening the publication delay (would be a meaningful operational change — worth checking annually). Decoding would need `pyart` or `xradar`, which is a meaningful new dependency LibreWXR currently avoids.
 
@@ -285,7 +285,7 @@ Paid / service-request model. IMN's data offerings explicitly note "information 
 
 Technically reachable anonymously (manifest at `nradar_img.json`, 6-min cadence, JPEG 577×400 at 64/128/256 km ranges), but the licence explicitly prohibits commercial redistribution: *"the use of the Materials for commercial purposes is strictly prohibited unless... prior written authorisation is obtained."* Radar imagery is **not** on the `data.gov.hk` Open Data API — the permissive open-data terms don't cover it.
 
-If the licence ever opens, implementation effort would be ~1.5–2 days. The product is rainfall rate (mm/h, 13 discrete bins), not raw dBZ — would need Marshall-Palmer inverse. Burned-in logo / legend / range rings / Chinese text / terrain basemap, plus circular crop with corner-fill, plus JPEG lossy compression all make palette matching harder than a clean PNG-palette source.
+If the licence ever opens, implementation effort would be \~1.5–2 days. The product is rainfall rate (mm/h, 13 discrete bins), not raw dBZ — would need Marshall-Palmer inverse. Burned-in logo / legend / range rings / Chinese text / terrain basemap, plus circular crop with corner-fill, plus JPEG lossy compression all make palette matching harder than a clean PNG-palette source.
 
 Trigger to revisit: HKO adds radar to `data.gov.hk` (where they already publish warnings, climate, station data under permissive terms).
 
@@ -299,9 +299,9 @@ Trigger to revisit: NCM publishes radar to their ArcGIS Hub, to anonymous AWS/CD
 
 ### Turkey — MGM
 
-~25-radar national network, but no open raw data. `www.mgm.gov.tr/sondurum/radar.aspx` serves rendered PNG snapshots only — per-station products and a national "combined" composite. Latest snapshot only, no time-series archive, no documented API, no published terms of use. The raw data lives behind MEVBİS (`Meteorolojik Veri-Bilgi Sunum ve Satış Sistemi` — literally "Sales System"), MGM's commercial portal with per-request licensing.
+\~25-radar national network, but no open raw data. `www.mgm.gov.tr/sondurum/radar.aspx` serves rendered PNG snapshots only — per-station products and a national "combined" composite. Latest snapshot only, no time-series archive, no documented API, no published terms of use. The raw data lives behind MEVBİS (`Meteorolojik Veri-Bilgi Sunum ve Satış Sistemi` — literally "Sales System"), MGM's commercial portal with per-request licensing.
 
-Turkey is fully inside the ICON-EU domain (29.5–70.5°N, 23.5°W–62.5°E), so the loss is ~155 km radar resolution → 7 km model resolution, not radar → 9 km IFS. Material but bounded.
+Turkey is fully inside the ICON-EU domain (29.5–70.5°N, 23.5°W–62.5°E), so the loss is \~155 km radar resolution → 7 km model resolution, not radar → 9 km IFS. Material but bounded.
 
 Trigger to revisit: MGM joins OPERA (talked about for years, no movement) or publishes an open-data radar feed.
 
@@ -331,7 +331,7 @@ LibreWXR's NWP chain blends multiple regional models on top of a global base, di
 
 ### HRRR-Alaska (priority 11)
 
-Same model as HRRR-CONUS, disjoint domain. 3 km native polar stereographic, hourly `wrfsfcf` (no subh available). Same `noaa-hrrr-bdp-pds` bucket, `/alaska/` prefix, `.ak.grib2` filename infix. Publishes ~80 minutes after run init (later than CONUS subh). Linear interpolation only — optical flow deferred per the original integration plan.
+Same model as HRRR-CONUS, disjoint domain. 3 km native polar stereographic, hourly `wrfsfcf` (no subh available). Same `noaa-hrrr-bdp-pds` bucket, `/alaska/` prefix, `.ak.grib2` filename infix. Publishes \~80 minutes after run init (later than CONUS subh). Linear interpolation only — optical flow deferred per the original integration plan.
 
 ### HRDPS (priority 20)
 
@@ -359,7 +359,7 @@ Outside the DINI domain: Iberia, southern Italy, Greece, Balkans, Belarus / Ukra
 
 **First non-GRIB source in the chain** — uses NetCDF4/HDF5 via h5py. Spherical LCC, single tangent at -35°S, sphere R = 6,370,000 m (1,229 m smaller than the usual WMO sphere; calibrated against the file's `Lambert_Conformal` grid_mapping attrs and 2-D lat/lon coord arrays). Southern-hemisphere LCC subtlety: `n = sin(-35°) < 0`, but the projected y still increases going north because the `n < 0` sign already lives in F and ρ_0. `PP` field cumulative-since-init mm → diff → Marshall-Palmer.
 
-Per-file size (~34 MB NetCDF4) makes serial download painfully slow, so this source uses a **parallel fetch pipeline** (concurrency 6) — Phase 1 downloads accumulations in parallel, Phase 2 walks them sequentially per run to compute diffs. Other sources don't need this since their files are 1–9 MB.
+Per-file size (\~34 MB NetCDF4) makes serial download painfully slow, so this source uses a **parallel fetch pipeline** (concurrency 6) — Phase 1 downloads accumulations in parallel, Phase 2 walks them sequentially per run to compute diffs. Other sources don't need this since their files are 1–9 MB.
 
 ### ECMWF IFS (priority 1000, global base)
 
@@ -371,7 +371,7 @@ Open access and additive value, but lower priority than what's currently shippin
 
 ### UK Met Office UKV
 
-1.5 km native / 0.018° (~2 km) public distribution on AWS Open Data Registry (`registry.opendata.aws/met-office-uk-deterministic/`), anonymous. 8 cycles per day, **2-year rolling archive** (unusually long). License: **CC BY-SA 4.0** — ShareAlike clause is the only complication. Code (AGPL) and data (CC BY-SA) are separate works so combining is generally fine, but downstream tile redistribution carries the SA obligation.
+1.5 km native / 0.018° (\~2 km) public distribution on AWS Open Data Registry (`registry.opendata.aws/met-office-uk-deterministic/`), anonymous. 8 cycles per day, **2-year rolling archive** (unusually long). License: **CC BY-SA 4.0** — ShareAlike clause is the only complication. Code (AGPL) and data (CC BY-SA) are separate works so combining is generally fine, but downstream tile redistribution carries the SA obligation.
 
 Domain: UK + Ireland — high overlap with DMI DINI (already 2 km native over the same area), so the upgrade is marginal at typical zooms.
 
@@ -383,7 +383,7 @@ The cadence is a real downside: **12-hourly cycles** mean the forecast at "now" 
 
 ### AROME Réunion-Mayotte / French Guiana / New Caledonia / French Polynesia
 
-Etalab-licensed, keyless on data.gouv.fr (same channel as AROME Antilles). 1.3 km native, hourly, 4× daily. Each domain is small and remote: Indian Ocean / Madagascar (Réunion-Mayotte), N. South America corner (French Guiana), SW Pacific (New Caledonia), S. Pacific (French Polynesia). Cheap to add once AROME Antilles is in — same source class with different domain constants. ~50 LOC + tests per added overseas variant.
+Etalab-licensed, keyless on data.gouv.fr (same channel as AROME Antilles). 1.3 km native, hourly, 4× daily. Each domain is small and remote: Indian Ocean / Madagascar (Réunion-Mayotte), N. South America corner (French Guiana), SW Pacific (New Caledonia), S. Pacific (French Polynesia). Cheap to add once AROME Antilles is in — same source class with different domain constants. \~50 LOC + tests per added overseas variant.
 
 ### Canada CAPS (Canadian Arctic Prediction System)
 
@@ -399,7 +399,7 @@ Revisit if a Nordic-fidelity feature ever becomes a priority.
 
 ### KNMI HARMONIE-AROME Europe (P3)
 
-Same physics as DMI DINI, but regridded down to 5.5 km (0.05° rotated lat-lon) — DMI gives ~7× more pixels at the same domain. KNMI also requires per-user API-key registration. Picking DMI DINI is strictly better.
+Same physics as DMI DINI, but regridded down to 5.5 km (0.05° rotated lat-lon) — DMI gives \~7× more pixels at the same domain. KNMI also requires per-user API-key registration. Picking DMI DINI is strictly better.
 
 ### KNMI HARMONIE-AROME Netherlands (P1)
 
@@ -431,15 +431,15 @@ Svalbard + Barents Sea. Deferred along with MET Nordic.
 
 ### Japan — JMA LFM / MSM
 
-Structurally blocked (verified 2026-05-08). JMBSC is the sole distributor for all of JMA's raw GRIB output (GSM, MSM, MSM upper-level, LFM) — only via paid contract, no anonymous public endpoint. Open-Meteo ingests GSM + MSM via a private credentialed URL their docs explicitly state is "not publicly disclosed." Even with a JMBSC contract, AGPL self-host redistribution would likely violate terms. The only public JMA data is GSM via NOMADS / WMO GTS mirrors at 0.5° / ~55 km — worse than IFS, not worth integrating.
+Structurally blocked (verified 2026-05-08). JMBSC is the sole distributor for all of JMA's raw GRIB output (GSM, MSM, MSM upper-level, LFM) — only via paid contract, no anonymous public endpoint. Open-Meteo ingests GSM + MSM via a private credentialed URL their docs explicitly state is "not publicly disclosed." Even with a JMBSC contract, AGPL self-host redistribution would likely violate terms. The only public JMA data is GSM via NOMADS / WMO GTS mirrors at 0.5° / \~55 km — worse than IFS, not worth integrating.
 
 ### China — CMA models
 
-Structurally blocked (verified 2026-05-08). Open-Meteo's CMA downloader requires a `--server` private credentialed URL just like JMA. `data.cma.cn` and `nmc.gov.cn` are browse-only; the WIS2 node publishes discovery metadata but the actual GRIB feeds remain on the WMO-restricted GTS pipe. No CMA bucket on AWS Open Data Registry. GRAPES-GFS is also only 0.125° (~14 km), coarser than IFS — no upgrade even if it opened up.
+Structurally blocked (verified 2026-05-08). Open-Meteo's CMA downloader requires a `--server` private credentialed URL just like JMA. `data.cma.cn` and `nmc.gov.cn` are browse-only; the WIS2 node publishes discovery metadata but the actual GRIB feeds remain on the WMO-restricted GTS pipe. No CMA bucket on AWS Open Data Registry. GRAPES-GFS is also only 0.125° (\~14 km), coarser than IFS — no upgrade even if it opened up.
 
 ### Korea — KMA LDPS / KIM
 
-Structurally blocked (verified 2026-05-08). Anonymous FTP at `ncms.kma.go.kr` that Open-Meteo was using was discontinued by KMA on 2026-03-31 when they switched from UM-based LDPS to KIM-based l010. The replacement `apihub.kma.go.kr` requires a per-user `authKey` query parameter with a 5 GB/day quota (20 GB for approved researchers). One LDPS model cycle (49 hourly steps × ~14 variables in GRIB2) blows through that ceiling — incompatible with serving tiles to multiple users from a single self-hosted instance.
+Structurally blocked (verified 2026-05-08). Anonymous FTP at `ncms.kma.go.kr` that Open-Meteo was using was discontinued by KMA on 2026-03-31 when they switched from UM-based LDPS to KIM-based l010. The replacement `apihub.kma.go.kr` requires a per-user `authKey` query parameter with a 5 GB/day quota (20 GB for approved researchers). One LDPS model cycle (49 hourly steps × \~14 variables in GRIB2) blows through that ceiling — incompatible with serving tiles to multiple users from a single self-hosted instance.
 
 ### CWA Taiwan WRF
 
@@ -451,7 +451,7 @@ BMKG Indonesia, PAGASA Philippines, Vietnam NCHMF, Thailand TMD, Mongolia — al
 
 ### Brazil — CPTEC ETA / CPTEC-Regional
 
-Open but native resolutions are ~7 km at 1–2× daily cycles. Marginal upgrade over IFS 9 km. WRF-SMN Argentina is the better S. America pick.
+Open but native resolutions are \~7 km at 1–2× daily cycles. Marginal upgrade over IFS 9 km. WRF-SMN Argentina is the better S. America pick.
 
 ### US — NAM / RAP
 
