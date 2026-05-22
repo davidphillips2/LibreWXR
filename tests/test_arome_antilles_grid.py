@@ -162,6 +162,63 @@ class TestTiming:
         assert BRACKET_INTERVAL_SECONDS == 3600
 
 
+# ── Run windowing (regression for the empty-list edge case) ──────────
+
+
+class TestWindowRuns:
+    """Regression tests for ``_window_runs`` clamping.
+
+    Pre-2026-05-21 the windowing used a plain ``max(...)`` for the
+    earliest run, which collapsed to an empty ``range()`` for ~1 h of
+    every 6 h cycle (when publish_delay > cycle_interval).  The fix
+    clamps with ``min(latest_run_ts, ...)`` so the list always contains
+    at least the latest published run.
+    """
+
+    def test_zero_history_zero_horizon_returns_latest_run(self):
+        # 00:38 UTC — minutes after the previous 6h boundary; with a
+        # 7h publish delay the old math went empty here.
+        now = int(datetime(2026, 5, 22, 0, 38, tzinfo=timezone.utc).timestamp())
+        latest, runs = AROMEAntillesGrid._window_runs(
+            now_ts=now, history_seconds=0, horizon_seconds=0,
+            publish_delay_seconds=7 * 3600,
+        )
+        expected_latest = int(
+            datetime(2026, 5, 21, 12, 0, tzinfo=timezone.utc).timestamp(),
+        )
+        assert latest == expected_latest
+        assert runs, "runs_to_consider must never be empty when a published run exists"
+        assert runs[-1] == latest  # latest run always included
+
+    @pytest.mark.parametrize(
+        "now_h_utc",
+        [0.5, 1.5, 6.5, 7.5, 12.5, 13.5, 18.5, 19.5],
+    )
+    def test_non_empty_across_cycle_phase_with_long_publish_delay(self, now_h_utc):
+        # Sweep across each 6h cycle's leading hours; the empty-list
+        # bug used to hit the first hour of each cycle.
+        hour = int(now_h_utc)
+        minute = int(round((now_h_utc - hour) * 60))
+        now = int(datetime(2026, 5, 22, hour, minute, tzinfo=timezone.utc).timestamp())
+        latest, runs = AROMEAntillesGrid._window_runs(
+            now_ts=now, history_seconds=0, horizon_seconds=0,
+            publish_delay_seconds=7 * 3600,
+        )
+        assert runs, f"runs_to_consider went empty at {now_h_utc:.1f}h UTC"
+        assert latest in runs
+
+    def test_lookback_window_includes_older_runs_when_history_demands(self):
+        # 13:00 UTC + 12h history with 7h delay → latest is 06Z same
+        # day, history reaches back into prev-day cycles.  Should
+        # include at least latest plus one older run.
+        now = int(datetime(2026, 5, 22, 13, 0, tzinfo=timezone.utc).timestamp())
+        _, runs = AROMEAntillesGrid._window_runs(
+            now_ts=now, history_seconds=12 * 3600, horizon_seconds=0,
+            publish_delay_seconds=7 * 3600,
+        )
+        assert len(runs) >= 2
+
+
 # ── URL construction ──────────────────────────────────────────────────
 
 

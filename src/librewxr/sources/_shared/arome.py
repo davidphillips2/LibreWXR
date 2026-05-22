@@ -492,6 +492,43 @@ class AROMEOverseasGrid:
             )
         return self._client
 
+    @classmethod
+    def _window_runs(
+        cls,
+        now_ts: int,
+        history_seconds: int,
+        horizon_seconds: int,
+        publish_delay_seconds: int,
+    ) -> tuple[int, list[int]]:
+        """Return ``(latest_run_ts, runs_to_consider)`` for the given window.
+
+        Extracted so the windowing math is unit-testable.  Always returns
+        a non-empty ``runs_to_consider`` (at minimum the latest published
+        run), so the fetch loop is guaranteed to attempt at least one
+        run per call as long as a published run exists.
+
+        The earlier ``max(floor_cycle(window_start - CYCLE), latest -
+        LOOKBACK * CYCLE)`` formulation went empty when ``publish_delay
+        > CYCLE_INTERVAL`` — for ~1 h of each cycle, the floor of
+        ``window_start - CYCLE`` lands past ``latest_run_ts`` and the
+        Python ``range`` collapses.  Clamping with ``min(latest_run_ts,
+        ...)`` fixes that without changing the look-back behaviour for
+        the rest of the cycle.
+        """
+        latest_run_ts = latest_published_run(now_ts, publish_delay_seconds)
+        window_start = now_ts - history_seconds
+        earliest_run = min(
+            latest_run_ts,
+            max(
+                floor_cycle(window_start - cls.CYCLE_INTERVAL_SECONDS),
+                latest_run_ts - cls.RUN_LOOKBACK_CYCLES * cls.CYCLE_INTERVAL_SECONDS,
+            ),
+        )
+        runs_to_consider = list(range(
+            earliest_run, latest_run_ts + 1, cls.CYCLE_INTERVAL_SECONDS,
+        ))
+        return latest_run_ts, runs_to_consider
+
     async def fetch(
         self,
         now_ts: int | None = None,
@@ -503,7 +540,9 @@ class AROMEOverseasGrid:
                 now_ts = int(datetime.now(tz=timezone.utc).timestamp())
 
             publish_delay = self._get_setting("publish_delay_minutes") * 60
-            latest_run_ts = latest_published_run(now_ts, publish_delay)
+            latest_run_ts, runs_to_consider = self._window_runs(
+                now_ts, history_seconds, horizon_seconds, publish_delay,
+            )
             if (
                 self._latest_run_ts is None
                 or latest_run_ts > self._latest_run_ts
@@ -513,13 +552,6 @@ class AROMEOverseasGrid:
             window_start = now_ts - history_seconds
             window_end = now_ts + horizon_seconds
 
-            earliest_run = max(
-                floor_cycle(window_start - self.CYCLE_INTERVAL_SECONDS),
-                latest_run_ts - self.RUN_LOOKBACK_CYCLES * self.CYCLE_INTERVAL_SECONDS,
-            )
-            runs_to_consider = list(range(
-                earliest_run, latest_run_ts + 1, self.CYCLE_INTERVAL_SECONDS,
-            ))
             if not runs_to_consider:
                 logger.debug("%s fetch: no runs available for window", self.friendly_name)
                 return
