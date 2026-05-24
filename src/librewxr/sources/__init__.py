@@ -171,13 +171,13 @@ def collect_satellite_contributions(settings, cache_dir) -> list:
     (one per channel; e.g. GMGSI returns LW + VIS together).  Each
     contribution carries its own instance, name, slug, and priority.
 
-    Returns ``[]`` when ``settings.gmgsi_enabled`` is False, short-
-    circuiting every provider call so no S3 / HTTP / cache machinery
-    gets stood up.  Mirrors the radar-toggle pattern from
+    Returns ``[]`` when ``settings.satellite_enabled`` is False,
+    short-circuiting every provider call so no S3 / HTTP / cache
+    machinery gets stood up.  Mirrors the radar-toggle pattern from
     ``collect_radar_contributions``; future satellite-master toggles
     fold in here rather than at each provider.
     """
-    if not getattr(settings, "gmgsi_enabled", True):
+    if not getattr(settings, "satellite_enabled", True):
         return []
     contributions = []
     for provider in SATELLITE_PROVIDERS:

@@ -11,7 +11,6 @@ import numpy as np
 
 from librewxr.config import settings
 from librewxr.memory import release_memory
-from librewxr.data.cloud_grid import CloudGrid
 from librewxr.data.regions import REGIONS, RegionDef
 # Cross-source policy stays in this file (the discovery walker
 # populates ``self._sources`` but blending and fallback still belong
@@ -48,7 +47,6 @@ class RadarFetcher:
         store: FrameStore,
         cache: TileCache,
         nwp_contributions: list[NWPContribution] | None = None,
-        cloud_grid: CloudGrid | None = None,
         satellite_contributions: list[SatelliteContribution] | None = None,
         nowcast_generator=None,
         warmer=None,
@@ -67,11 +65,10 @@ class RadarFetcher:
         self._nwp_contributions: list[NWPContribution] = list(
             nwp_contributions or []
         )
-        self._cloud_grid = cloud_grid
         # Same dispatch pattern as nwp_contributions: every active
-        # satellite source (one per channel, e.g. GMGSI LW) flows
-        # through this list and gets a per-cycle background fetch.
-        # Adding a new satellite source needs zero edits here.
+        # satellite source (one per channel, e.g. GMGSI LW + VIS)
+        # flows through this list and gets a per-cycle background
+        # fetch.  Adding a new satellite source needs zero edits here.
         self._satellite_contributions: list[SatelliteContribution] = list(
             satellite_contributions or []
         )
@@ -80,7 +77,6 @@ class RadarFetcher:
         self._radar_cache = radar_cache
         self._on_cycle_complete = on_cycle_complete
         self._task: asyncio.Task | None = None
-        self._cloud_task: asyncio.Task | None = None
         self._satellite_tasks: dict[str, asyncio.Task] = {}
         self._enabled_regions = [
             REGIONS[name] for name in settings.get_enabled_regions()
@@ -292,7 +288,7 @@ class RadarFetcher:
                 logger.exception("Nowcast generation failed")
 
     async def _fetch_auxiliary_grids(self) -> None:
-        """Fetch every enabled NWP grid and kick off background cloud fetch.
+        """Fetch every enabled NWP grid and kick off background satellite fetches.
 
         NWP grids hit independent S3 / HTTPS endpoints with no shared
         state, so they fan out under a small semaphore (sized by
@@ -352,27 +348,12 @@ class RadarFetcher:
                 for label, grid, kwargs, msg in grid_specs
             ])
 
-        # Cloud data loads in the background — never blocks radar startup.
-        # Skip if a previous fetch is still running (downloading .om files
-        # takes ~40s each).  With disk caching, already-cached timestamps
-        # are free to check, so there's no cost to running every cycle.
-        if self._cloud_grid is not None:
-            already_running = (
-                self._cloud_task is not None and not self._cloud_task.done()
-            )
-            if already_running:
-                logger.debug("Cloud fetch still running, skipping")
-            else:
-                self._cloud_task = asyncio.create_task(
-                    self._fetch_cloud_background()
-                )
-
-        # Same background pattern for satellite sources — one task per
+        # Satellite sources run as background tasks — one per
         # contribution.  Per-channel detachment keeps GMGSI LW from
-        # gating on a slow GMGSI VIS fetch (or vice versa) once the
-        # composite renderer lands in Phase 2.  Each fetch is small
-        # (~7.5 MB) but goes through a high-latency S3 endpoint, so
-        # treating them as background tasks matches the cloud pattern.
+        # gating on a slow GMGSI VIS fetch (or vice versa).  Each
+        # fetch is small (~7.5 MB) but goes through a high-latency
+        # S3 endpoint, so detaching from the main cycle prevents
+        # network jitter from stalling radar/NWP work.
         from librewxr.sources import satellite_source_slug
 
         for contrib in self._satellite_contributions:
@@ -385,32 +366,14 @@ class RadarFetcher:
                 self._fetch_satellite_background(contrib),
             )
 
-    async def _fetch_cloud_background(self) -> None:
-        """Fetch cloud cover data without blocking the main fetch cycle.
-
-        Cloud is the slowest auxiliary fetch (~40 s per .om file), so it
-        runs detached and the main cycle dumps ``state.json`` without
-        waiting.  We re-fire the cycle-complete hook here on success so
-        render-only workers pick up the new cloud grid mid-cycle instead
-        of waiting for the next :x0 boundary.
-        """
-        try:
-            await self._cloud_grid.fetch()
-        except Exception:
-            logger.warning("Cloud cover fetch failed, satellite layer may be stale")
-            release_memory()
-            return
-        release_memory()
-        await self._fire_cycle_complete()
-
     async def _fetch_satellite_background(
         self, contrib: SatelliteContribution,
     ) -> None:
         """Fetch one satellite source detached from the main cycle.
 
-        Mirrors ``_fetch_cloud_background``: one task per source, fires
-        the cycle-complete hook on success so render-only workers pick
-        up new frames mid-cycle.  A failed fetch is warned and dropped;
+        One background task per satellite source, firing the
+        cycle-complete hook on success so render-only workers pick up
+        new frames mid-cycle.  A failed fetch is warned and dropped;
         the next cycle retries.
         """
         try:

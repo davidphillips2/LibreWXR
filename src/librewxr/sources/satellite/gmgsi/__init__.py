@@ -30,7 +30,7 @@ def satellite_provider(settings, cache_dir) -> list[SatelliteContribution]:
     Disabling VIS while LW stays on degrades the composite to LW-only.
     """
     contributions: list[SatelliteContribution] = []
-    retention = getattr(settings, "gmgsi_retention_hours", 12)
+    retention = getattr(settings, "satellite_max_frames", 12)
 
     if getattr(settings, "gmgsi_lw_enabled", True):
         contributions.append(

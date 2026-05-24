@@ -31,7 +31,6 @@ from rich.logging import RichHandler
 from librewxr.config import settings
 from librewxr.data.alerts_fetcher import WMOAlertsFetcher
 from librewxr.data.alerts_store import AlertsStore
-from librewxr.data.cloud_grid import CloudGrid
 from librewxr.data.coverage import build_coverage_masks, build_feather_masks
 from librewxr.data.fetcher import RadarFetcher
 from librewxr.data.master_state import dump_state
@@ -72,8 +71,6 @@ _LOG_TAGS = {
     "librewxr.sources.regional.north_america.canada.nwp.hrdps.grid": "hrdps",
     "librewxr.sources.regional.caribbean.nwp.arome_antilles.grid": "arome-ant",
     "librewxr.sources.regional.south_america.nwp.wrf_smn.grid": "wrf-smn",
-    "librewxr.data.cloud_grid": "cloud",
-    "librewxr.data.cloud_cache": "cloud",
     "librewxr.sources.satellite.gmgsi.source": "gmgsi",
     "librewxr.data.nowcast": "nowcast",
     "librewxr.data.master_state": "state",
@@ -129,11 +126,9 @@ async def run_pipeline() -> None:
     nwp_chain = NWPChain([c.instance for c in nwp_contribs])
     logger.info("NWP chain: [%s]", ", ".join(s.name for s in nwp_chain.sources))
 
-    cloud_grid = CloudGrid(cache_dir=cache_dir) if settings.satellite_enabled else None
-
     # GMGSI satellite sources — one contribution per enabled channel.
     # collect_satellite_contributions short-circuits to [] when
-    # gmgsi_enabled is False, mirroring the radar / NWP toggle pattern.
+    # satellite_enabled is False, mirroring the radar / NWP toggles.
     satellite_contribs = collect_satellite_contributions(settings, cache_dir)
     satellite_grids_by_slug = {
         satellite_source_slug(c): c.instance for c in satellite_contribs
@@ -182,7 +177,6 @@ async def run_pipeline() -> None:
         "frame_store": store,
         **nwp_grids_by_slug,
         **satellite_grids_by_slug,
-        "cloud_grid": cloud_grid,
         "nowcast_store": nowcast_store,
         "alerts_store": alerts_store,
     }
@@ -196,7 +190,6 @@ async def run_pipeline() -> None:
     fetcher = RadarFetcher(
         store, tile_cache,
         nwp_contributions=nwp_contribs,
-        cloud_grid=cloud_grid,
         satellite_contributions=satellite_contribs,
         nowcast_generator=nowcast_generator,
         warmer=None,  # tile warming is the render workers' job
@@ -246,8 +239,6 @@ async def run_pipeline() -> None:
         await fetcher.stop()
         if alerts_fetcher is not None:
             await alerts_fetcher.close()
-        if cloud_grid is not None:
-            await cloud_grid.close()
         if nowcast_store is not None:
             nowcast_store.cleanup()
         store.cleanup()

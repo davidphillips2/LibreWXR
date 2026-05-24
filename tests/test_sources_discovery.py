@@ -279,13 +279,13 @@ def test_satellite_providers_are_callables():
 
 
 def test_satellite_disabled_returns_empty_contributions(tmp_path):
-    """``gmgsi_enabled=False`` short-circuits the satellite collector."""
+    """``satellite_enabled=False`` short-circuits the satellite collector."""
     from unittest.mock import MagicMock
 
     from librewxr.sources import collect_satellite_contributions
 
     settings = MagicMock()
-    settings.gmgsi_enabled = False
+    settings.satellite_enabled = False
     contribs = collect_satellite_contributions(settings, cache_dir=tmp_path)
     assert contribs == []
 
@@ -328,7 +328,7 @@ def MagicMock_settings():
     from unittest.mock import MagicMock
 
     settings = MagicMock()
-    settings.gmgsi_enabled = True
+    settings.satellite_enabled = True
     return settings
 
 

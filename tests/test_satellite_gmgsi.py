@@ -72,7 +72,7 @@ def test_satellite_provider_returns_lw_and_vis_when_both_enabled(tmp_path: Path)
     settings = MagicMock()
     settings.gmgsi_lw_enabled = True
     settings.gmgsi_vis_enabled = True
-    settings.gmgsi_retention_hours = 12
+    settings.satellite_max_frames = 12
 
     contribs = satellite_provider(settings, cache_dir=tmp_path)
     assert len(contribs) == 2
@@ -97,7 +97,7 @@ def test_satellite_provider_lw_only_when_vis_disabled(tmp_path: Path):
     settings = MagicMock()
     settings.gmgsi_lw_enabled = True
     settings.gmgsi_vis_enabled = False
-    settings.gmgsi_retention_hours = 12
+    settings.satellite_max_frames = 12
 
     contribs = satellite_provider(settings, cache_dir=tmp_path)
     assert len(contribs) == 1
@@ -111,7 +111,7 @@ def test_satellite_provider_vis_only_when_lw_disabled(tmp_path: Path):
     settings = MagicMock()
     settings.gmgsi_lw_enabled = False
     settings.gmgsi_vis_enabled = True
-    settings.gmgsi_retention_hours = 12
+    settings.satellite_max_frames = 12
 
     contribs = satellite_provider(settings, cache_dir=tmp_path)
     assert len(contribs) == 1
