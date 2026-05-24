@@ -59,6 +59,27 @@ class NWPGrid(Protocol):
     async def close(self) -> None: ...
 
 
+@runtime_checkable
+class SatelliteSource(Protocol):
+    """Shape every satellite source class must satisfy.
+
+    A satellite source ingests one channel of imagery (e.g. GMGSI LW or
+    GMGSI VIS) on its own cadence, stores frames internally, and lets
+    the renderer sample lat/lon grids out of any stored timestamp.
+
+    Same ``fetch`` ergonomics as NWPGrid: signature varies per source
+    (channel-specific kwargs, native cadence), so it's declared by the
+    concrete class.  The pipeline introspects the signature via
+    ``inspect.signature`` when dispatching, the same way it does for
+    NWPGrid implementations.
+    """
+
+    name: str
+    timestamps: list[int]
+
+    async def close(self) -> None: ...
+
+
 @dataclass
 class RadarSourceContribution:
     """Return value from a source package's ``radar_provider(settings)``.
@@ -107,3 +128,28 @@ class NWPContribution:
     name: str
     slug: str | None = None
     regional: bool = True
+
+
+@dataclass
+class SatelliteContribution:
+    """Return value from a source package's ``satellite_provider(settings, cache_dir)``.
+
+    One contribution per channel: a multi-channel source family (like
+    GMGSI with LW + VIS) returns multiple contributions, each carrying
+    its own instance and slug.  The renderer references them by slug
+    when assembling composites.
+
+    ``priority`` is reserved for the day a second satellite-mosaic
+    source appears (none planned).  Lower number wins for any pixel
+    both cover.  Single-source today, so the field is mostly
+    ceremonial.
+
+    ``slug`` overrides the auto-generated snapshot / ``/health`` key.
+    Leave it ``None`` to derive the key from ``name`` (lowercase,
+    non-alphanumerics replaced with underscores, ``_grid`` suffixed).
+    """
+
+    instance: SatelliteSource
+    priority: int
+    name: str
+    slug: str | None = None

@@ -57,6 +57,8 @@ def test_protocols_and_contribution_dataclasses_importable():
         NWPGrid,
         RadarSource,
         RadarSourceContribution,
+        SatelliteContribution,
+        SatelliteSource,
     )
 
     # Smoke-construct the contribution dataclasses with minimal args to
@@ -70,13 +72,15 @@ def test_protocols_and_contribution_dataclasses_importable():
     nwp = NWPContribution(instance=None, priority=10, name="X")  # type: ignore[arg-type]
     assert nwp.priority == 10
 
+    sat = SatelliteContribution(instance=None, priority=10, name="X")  # type: ignore[arg-type]
+    assert sat.priority == 10
+    assert sat.slug is None
+
     # Protocols themselves should be importable + runtime_checkable.
-    assert hasattr(RadarSource, "__protocol_attrs__") or hasattr(
-        RadarSource, "_is_runtime_protocol"
-    )
-    assert hasattr(NWPGrid, "__protocol_attrs__") or hasattr(
-        NWPGrid, "_is_runtime_protocol"
-    )
+    for proto in (RadarSource, NWPGrid, SatelliteSource):
+        assert hasattr(proto, "__protocol_attrs__") or hasattr(
+            proto, "_is_runtime_protocol"
+        )
 
 
 def test_regions_module_imports_cleanly_with_discovery_wired():
@@ -243,3 +247,94 @@ def test_regional_nwp_disabled_keeps_only_ifs(tmp_path):
         assert [c.name for c in disabled] == ["ECMWF IFS"]
     finally:
         real_settings.regional_nwp_enabled = True
+
+
+def test_satellite_source_slug_uses_override_when_set():
+    """Explicit ``slug`` wins over name-derived slug."""
+    from librewxr.sources import satellite_source_slug
+    from librewxr.sources._base import SatelliteContribution
+
+    sat = SatelliteContribution(
+        instance=None, priority=10, name="GMGSI LW", slug="custom_key",  # type: ignore[arg-type]
+    )
+    assert satellite_source_slug(sat) == "custom_key"
+
+
+def test_satellite_source_slug_derives_from_name():
+    """Name-derived slug: lowercase + non-word → underscore + ``_grid`` suffix."""
+    from librewxr.sources import satellite_source_slug
+    from librewxr.sources._base import SatelliteContribution
+
+    sat = SatelliteContribution(
+        instance=None, priority=10, name="GMGSI LW",  # type: ignore[arg-type]
+    )
+    assert satellite_source_slug(sat) == "gmgsi_lw_grid"
+
+
+def test_satellite_providers_are_callables():
+    """Every entry in ``SATELLITE_PROVIDERS`` must be callable."""
+    from librewxr.sources import SATELLITE_PROVIDERS
+
+    assert all(callable(p) for p in SATELLITE_PROVIDERS)
+
+
+def test_satellite_disabled_returns_empty_contributions(tmp_path):
+    """``gmgsi_enabled=False`` short-circuits the satellite collector."""
+    from unittest.mock import MagicMock
+
+    from librewxr.sources import collect_satellite_contributions
+
+    settings = MagicMock()
+    settings.gmgsi_enabled = False
+    contribs = collect_satellite_contributions(settings, cache_dir=tmp_path)
+    assert contribs == []
+
+
+def test_satellite_collector_normalizes_provider_list_returns(tmp_path, monkeypatch):
+    """Providers may return one contribution or a list of them.
+
+    Multi-channel sources (GMGSI: LW + VIS) return a list; the collector
+    flattens them so callers see a uniform ``list[SatelliteContribution]``.
+    """
+    from librewxr.sources import _base
+    from librewxr.sources import collect_satellite_contributions
+
+    settings = MagicMock_settings()
+
+    lw = _base.SatelliteContribution(instance=_StubSat(), priority=10, name="LW")
+    vis = _base.SatelliteContribution(instance=_StubSat(), priority=11, name="VIS")
+    wv = _base.SatelliteContribution(instance=_StubSat(), priority=12, name="WV")
+
+    # Provider returning a list — two contributions in one call.
+    def provider_multi(_settings, _cache_dir):
+        return [lw, vis]
+
+    # Provider returning a single contribution — same call.
+    def provider_single(_settings, _cache_dir):
+        return wv
+
+    monkeypatch.setattr(
+        "librewxr.sources.SATELLITE_PROVIDERS",
+        [provider_multi, provider_single],
+    )
+    contribs = collect_satellite_contributions(settings, cache_dir=tmp_path)
+    names = [c.name for c in contribs]
+    # Sorted by priority: 10, 11, 12 → LW, VIS, WV
+    assert names == ["LW", "VIS", "WV"]
+
+
+def MagicMock_settings():
+    """A MagicMock pre-seeded with the toggle defaults the collector reads."""
+    from unittest.mock import MagicMock
+
+    settings = MagicMock()
+    settings.gmgsi_enabled = True
+    return settings
+
+
+class _StubSat:
+    """Minimal stand-in for a SatelliteSource — only needs to be truthy."""
+    name = "stub"
+    timestamps: list[int] = []
+
+    async def close(self) -> None: ...
