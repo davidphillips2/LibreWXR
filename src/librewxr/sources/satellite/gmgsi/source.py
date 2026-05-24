@@ -52,10 +52,24 @@ LAT_MIN = -72.7368
 LON_MIN = -179.9284
 LON_MAX = 179.9996
 
-# Derived 1-D coordinate vectors (top→bottom, west→east).  GMGSI's
-# native lat array is north-to-south (row 0 = +72.7°), so we mirror
-# that orientation here for direct array indexing.
-LAT_VEC = np.linspace(LAT_MAX, LAT_MIN, GRID_HEIGHT, dtype=np.float32)
+# GMGSI rows are spaced uniformly in the Mercator y coordinate
+# ``y = atanh(sin(lat))``, NOT uniformly in latitude.  Verified
+# empirically against the live NetCDF: the local row-step in latitude
+# is ~0.021°/row at row 0 (lat ≈ 72.7°), ~0.038°/row at row 500
+# (lat ≈ 58°), ~0.060°/row at row 1000 (lat ≈ 34°), and ~0.072°/row
+# at the equator — cos-of-lat compressed exactly the way Mercator
+# prescribes.  This caught us once already: an earlier implementation
+# assumed equirectangular spacing and the resulting renders shifted
+# every land mass ~600 miles south near mid-latitudes.  Treat ``LAT_VEC``
+# as authoritative and never assume row count alone gives a latitude.
+_Y_MAX = float(np.arctanh(np.sin(np.deg2rad(LAT_MAX))))
+_Y_MIN = float(np.arctanh(np.sin(np.deg2rad(LAT_MIN))))
+_Y_STEP = (_Y_MAX - _Y_MIN) / (GRID_HEIGHT - 1)
+_Y_VEC = np.linspace(_Y_MAX, _Y_MIN, GRID_HEIGHT, dtype=np.float64)
+LAT_VEC = np.rad2deg(np.arcsin(np.tanh(_Y_VEC))).astype(np.float32)
+
+# Longitude is plate carrée (linear) — verified by walking columns in
+# the live file.  Step is exactly ~0.072°/col across the full disk.
 LON_VEC = np.linspace(LON_MIN, LON_MAX, GRID_WIDTH, dtype=np.float32)
 
 # S3 bucket — anonymous, NOAA Open Data Dissemination Program.
@@ -387,11 +401,17 @@ class GMGSISource:
 
         grid = self._frames[ts]
 
-        # Discrete index per pixel.  Lat decreases top→bottom in the
-        # grid, so row = (LAT_MAX − lat) / step.
-        lat_step = (LAT_MAX - LAT_MIN) / (GRID_HEIGHT - 1)
+        # Mercator row inversion: rows are uniform in y=atanh(sin(lat)),
+        # not in lat.  Clip sin(lat) shy of ±1 so atanh stays finite at
+        # the geometric poles even though the in_bounds mask below will
+        # zero out anything past LAT_MAX/LAT_MIN anyway.
+        sin_lat = np.clip(
+            np.sin(np.deg2rad(lat.astype(np.float64))), -0.9999, 0.9999,
+        )
+        y_query = np.arctanh(sin_lat)
+        row = ((_Y_MAX - y_query) / _Y_STEP).astype(np.int32)
+
         lon_step = (LON_MAX - LON_MIN) / (GRID_WIDTH - 1)
-        row = ((LAT_MAX - lat) / lat_step).astype(np.int32)
         col = ((lon - LON_MIN) / lon_step).astype(np.int32)
 
         # Mask points outside the global band — leave them at the
