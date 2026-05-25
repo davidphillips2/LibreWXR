@@ -351,9 +351,9 @@ WebP encoding quality for tiles requested in `.webp` format. Does not affect PNG
 
 ### `LIBREWXR_TILE_CACHE_MB`
 
-Maximum tile cache size in megabytes, **per worker**. The cache stores rendered tile images (PNG/WebP bytes) and evicts the oldest entries when this byte limit is reached.
+Maximum tile cache size in megabytes, **per worker**. The cache stores pre-presentation `TileGeometry` records — uint8 pixel values plus an optional snow mask — keyed on `(timestamp, z, x, y, tile_size, smooth, snow)`. Color scheme, output format, and arrow style are applied per request in the cheap `present_tile` step, so one cached entry serves every variant of a given viewport. Oldest entries are evicted when this byte limit is reached.
 
-Higher values mean faster tile serving for repeat requests; lower values save RAM. In multi-worker mode the default is reduced to 64 MB per worker (set via `docker-compose.multiworker.yml`) since many workers share the rack.
+Higher values mean faster tile serving for repeat requests; lower values save RAM. In multi-worker mode the default is reduced to 64 MB per worker (set via `docker-compose.multiworker.yml`) since many workers share the rack. At a 512² tile size each geometry entry is ~256 KB, so 200 MB holds ~800 viewport geometries per worker.
 
 | | |
 |---|---|
@@ -374,7 +374,7 @@ These caches are the largest RAM consumer after frame data. Reducing this saves 
 
 ### `LIBREWXR_WARMER_THREADS`
 
-Thread pool size for background tile cache warming, **per worker**. When a tile is requested, the warmer pre-renders that same tile position for all other timestamps in the background, so animation playback is smooth without waiting for each frame to render on demand.
+Thread pool size for background tile cache warming, **per worker**. When a tile is requested, the warmer pre-computes the geometry for that same tile position at all other timestamps in the background, so animation playback is smooth without waiting for each frame to render on demand. Warming covers all color schemes and output formats automatically because the cache stores pre-presentation geometry, not encoded bytes.
 
 | | |
 |---|---|
@@ -436,7 +436,7 @@ Number of uvicorn worker processes.
 
 ### `LIBREWXR_MEMORY_LIMIT_MB`
 
-Memory limit in MB for the in-process memory pressure monitor. When RSS usage exceeds 85% of this limit, the tile cache and coordinate caches are automatically trimmed.
+Memory limit in MB for the memory pressure monitor. The monitor checks the container's cgroup memory usage (cgroup v2 `memory.current`, falling back to v1 `memory.usage_in_bytes`, then to the worker's own RSS outside containers) against this limit. Thresholds: at 80% it logs a warning; at 85% each worker evicts half its tile cache and runs `malloc_trim(0)` to return freed pages to the OS; at 90% the tile and coordinate caches are cleared entirely. In multi-worker mode every worker reads the same cgroup figure, so the thresholds fire across all workers in the same check window — the cache evictions add up to a container-wide drop.
 
 | | |
 |---|---|
