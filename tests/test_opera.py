@@ -32,7 +32,9 @@ class TestOperaRegion:
         assert r.height == 4400
 
     def test_europe_group_resolution(self):
-        assert resolve_regions("EUROPE") == ["OPERA"]
+        # EUROPE bundles OPERA + ITCOMP (DPC Italian composite).  Group
+        # membership is stored alphabetically by the discovery walker.
+        assert resolve_regions("EUROPE") == ["ITCOMP", "OPERA"]
 
     def test_all_includes_opera(self):
         assert "OPERA" in resolve_regions("ALL")

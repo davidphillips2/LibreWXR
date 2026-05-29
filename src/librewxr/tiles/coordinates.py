@@ -113,6 +113,62 @@ def _laea_pixel_coords(
     return col_grid, row_grid
 
 
+# ── Transverse Mercator projection (spherical) ────────────────────────
+# Snyder (1987) §8 — used by composites that specify their grid on a
+# sphere rather than an ellipsoid (DPC Italy: R=6371229, lat_0=42°,
+# lon_0=12.5°).  For met composites that stay well inside ±1000 km of
+# the central meridian, the spherical form is accurate to a few metres
+# vs. the WGS84 ellipsoidal form — well below 1 km/pixel resolution.
+
+
+def _tmerc_forward(
+    lon: np.ndarray, lat: np.ndarray, region: RegionDef
+) -> tuple[np.ndarray, np.ndarray]:
+    """Spherical Transverse Mercator forward projection.
+
+    Reads parameters from the RegionDef's ``tmerc_*`` fields.  The
+    formulas have singularities at λ - λ₀ = ±90°; those are far outside
+    every meteorological domain we care about — Italy's λ range stays
+    within ±8° of λ₀=12.5°.
+    """
+    phi_0 = math.radians(region.tmerc_lat0)
+    lam_0 = math.radians(region.tmerc_lon0)
+    R = region.tmerc_radius
+    k0 = region.tmerc_k0
+
+    phi = np.radians(lat)
+    lam = np.radians(lon)
+    lam_diff = lam - lam_0
+
+    cos_phi = np.cos(phi)
+    sin_phi = np.sin(phi)
+    cos_dlam = np.cos(lam_diff)
+    sin_dlam = np.sin(lam_diff)
+
+    # x = R · k0 · arctanh(cos(φ) · sin(λ - λ₀))
+    # Clip just inside ±1 to keep arctanh finite at the antipodal cusp.
+    B = cos_phi * sin_dlam
+    B = np.clip(B, -0.9999999, 0.9999999)
+    x = R * k0 * np.arctanh(B)
+
+    # y = R · k0 · (atan2(sin(φ), cos(φ) · cos(λ-λ₀)) - φ₀) — quadrant-safe
+    # equivalent of the textbook arctan(tan(φ) / cos(λ-λ₀)) form.
+    y = R * k0 * (np.arctan2(sin_phi, cos_phi * cos_dlam) - phi_0)
+
+    return x, y
+
+
+def _tmerc_pixel_coords(
+    lon: np.ndarray, lat: np.ndarray, region: RegionDef
+) -> tuple[np.ndarray, np.ndarray]:
+    """Convert lon/lat 1D arrays to 2D grid of (col_f, row_f) for a tmerc region."""
+    lon_grid, lat_grid = np.meshgrid(lon, lat)
+    x, y = _tmerc_forward(lon_grid, lat_grid, region)
+    col_grid = (x - region.grid_x_min) / region.grid_scale
+    row_grid = (region.grid_y_max - y) / region.grid_scale
+    return col_grid, row_grid
+
+
 # ── Region-aware coordinate functions ────────────────────────────────
 
 
@@ -135,6 +191,8 @@ def region_pixel_indices(
 
     if region.proj == "laea":
         col_grid, row_grid = _laea_pixel_coords(lon, lat, region)
+    elif region.proj == "tmerc":
+        col_grid, row_grid = _tmerc_pixel_coords(lon, lat, region)
     else:
         col_f = (lon - region.west) / region.pixel_size
         row_f = (region.north - lat) / region._ps_y
@@ -172,6 +230,8 @@ def region_pixel_indices_padded(
 
     if region.proj == "laea":
         col_grid, row_grid = _laea_pixel_coords(lon, lat, region)
+    elif region.proj == "tmerc":
+        col_grid, row_grid = _tmerc_pixel_coords(lon, lat, region)
     else:
         col_f = (lon - region.west) / region.pixel_size
         row_f = (region.north - lat) / region._ps_y
@@ -209,6 +269,8 @@ def region_pixel_indices_fractional(
 
     if region.proj == "laea":
         col_grid, row_grid = _laea_pixel_coords(lon, lat, region)
+    elif region.proj == "tmerc":
+        col_grid, row_grid = _tmerc_pixel_coords(lon, lat, region)
     else:
         col_f = (lon - region.west) / region.pixel_size
         row_f = (region.north - lat) / region._ps_y
@@ -237,6 +299,8 @@ def region_pixel_indices_fractional_padded(
 
     if region.proj == "laea":
         col_grid, row_grid = _laea_pixel_coords(lon, lat, region)
+    elif region.proj == "tmerc":
+        col_grid, row_grid = _tmerc_pixel_coords(lon, lat, region)
     else:
         col_f = (lon - region.west) / region.pixel_size
         row_f = (region.north - lat) / region._ps_y

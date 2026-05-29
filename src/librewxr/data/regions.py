@@ -25,7 +25,7 @@ class RegionDef:
     live_dir: str = ""
     archive_dir: str = ""
     # Projected grid support
-    proj: str = "latlon"  # "latlon" or "laea"
+    proj: str = "latlon"  # "latlon", "laea", or "tmerc"
     grid_x_min: float = 0.0   # x of top-left pixel in projection meters
     grid_y_max: float = 0.0   # y of top-left pixel in projection meters
     grid_scale: float = 1000.0  # meters per pixel
@@ -36,6 +36,13 @@ class RegionDef:
     laea_lon0: float = 0.0   # central meridian
     laea_x0: float = 0.0     # false easting (meters)
     laea_y0: float = 0.0     # false northing (meters)
+    # Transverse Mercator parameters (only used when proj="tmerc").
+    # Spherical TM per Snyder §8 — appropriate for met composites that
+    # specify their grid on a sphere (DPC Italy uses R=6371229).
+    tmerc_lat0: float = 0.0           # latitude of natural origin
+    tmerc_lon0: float = 0.0           # central meridian
+    tmerc_radius: float = 6371229.0   # sphere radius (WMO met sphere default)
+    tmerc_k0: float = 1.0             # scale factor at the central meridian
 
     @property
     def _ps_y(self) -> float:

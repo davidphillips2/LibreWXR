@@ -38,6 +38,11 @@ dependencies = [
     "netCDF4>=1.7",
     "lxml>=5.0",
     "shapely>=2.0",
+    # GeoTIFF decoder for the DPC Italian radar source (Cloud-Optimized
+    # GeoTIFF with LZW compression).  ``imagecodecs`` is required for
+    # LZW decode; ``tifffile`` is the pure-Python COG reader on top.
+    "tifffile>=2024.0",
+    "imagecodecs>=2024.0",
 ]
 
 [project.optional-dependencies]

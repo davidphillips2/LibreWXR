@@ -85,6 +85,7 @@ _SRC = REPO_ROOT / "src" / "librewxr" / "sources" / "regional"
 _marn  = _load_data_module(_SRC / "central_america/el_salvador/radar/marn/stations.py")
 _cwa   = _load_data_module(_SRC / "east_asia/taiwan/radar/cwa/stations.py")
 _opera = _load_data_module(_SRC / "europe/radar/opera/stations.py")
+_dpc   = _load_data_module(_SRC / "europe/italy/radar/dpc/stations.py")
 _msc   = _load_data_module(_SRC / "north_america/canada/radar/msc_canada/stations.py")
 _usa   = _load_data_module(_SRC / "north_america/usa/radar/stations.py")
 _mmd   = _load_data_module(_SRC / "southeast_asia/malaysia/radar/mmd/stations.py")
@@ -95,6 +96,8 @@ CWA_RANGES = _cwa.RANGE_OVERRIDES
 CWA_STATIONS = _cwa.STATIONS
 OPERA_RANGES = _opera.RANGE_OVERRIDES
 OPERA_STATIONS = _opera.STATIONS
+DPC_RANGES = _dpc.RANGE_OVERRIDES
+DPC_STATIONS = _dpc.STATIONS
 CANADA_STATIONS = _msc.STATIONS
 NEXRAD_ALASKA = _usa.NEXRAD_ALASKA
 NEXRAD_CONUS = _usa.NEXRAD_CONUS
@@ -112,6 +115,7 @@ REGION_RADAR_RANGE: dict[str, float] = {
     **MARN_RANGES,
     **CWA_RANGES,
     **OPERA_RANGES,
+    **DPC_RANGES,
     **MMD_RANGES,
 }
 
@@ -330,6 +334,12 @@ def build_radar_sources() -> list[Source]:
     # Ireland-and-Britain, etc. where station gaps exceed range.
     for poly in union_of_radar_circles(OPERA_STATIONS, range_for("OPERA")):
         radar.append(Source("OPERA (Europe)", "#9467bd", poly))
+
+    # DPC Italy — 24 radars (11 DPC-direct + 13 partner) at 150 km
+    # each.  Fills the Italian gap that OPERA leaves (Italy is not in
+    # the EUMETNET OPERA member station list).
+    for poly in union_of_radar_circles(DPC_STATIONS, range_for("ITCOMP")):
+        radar.append(Source("DPC Italy (ITCOMP)", "#d62728", poly))
 
     # CWA / QPESUMS Taiwan — 7 S-band radars covering Taiwan + a
     # substantial W. Pacific buffer for typhoon tracking.
@@ -702,7 +712,7 @@ if __name__ == "__main__":
         sources=build_radar_sources(),
         output_path=RADAR_OUTPUT,
         title="LibreWXR — Radar Composite Coverage",
-        subtitle="NOAA MRMS · MSC Canada · MARN/SNET · OPERA Europe · CWA / QPESUMS Taiwan · MET Malaysia",
+        subtitle="NOAA MRMS · MSC Canada · MARN/SNET · OPERA Europe · DPC Italy · CWA / QPESUMS Taiwan · MET Malaysia",
         legend_title="Radar composites",
         alpha_fill=0.40,
         hatch="//",
@@ -727,7 +737,7 @@ if __name__ == "__main__":
         sources=_filter_sources_to_bounds(build_radar_sources(), europe_bounds),
         output_path=EUROPE_RADAR_OUTPUT,
         title="LibreWXR — Radar Composite Coverage (Europe)",
-        subtitle="OPERA C-band composite — ~155 national radars across the EU + neighbours",
+        subtitle="OPERA pan-European composite (~155 radars) + DPC Italian national composite (24 radars) — ITCOMP wins precedence over OPERA where it covers",
         legend_title="Radar composite",
         alpha_fill=0.40,
         hatch="//",

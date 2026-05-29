@@ -149,6 +149,15 @@ class Settings(BaseSettings):
     # response whose ``Last-Modified`` is more than this far behind wall
     # clock is treated as legitimately old data, not relabelled forward.
     mmd_publish_lag_sec: int = 600
+    # DPC Italy national radar composite via the open Radar-DPC v2 REST API
+    # (``radar-api.protezionecivile.it``).  Anonymous, 5-min native cadence,
+    # Float32 GeoTIFF in spherical Transverse Mercator, CC-BY-SA 4.0.  Sole
+    # Italian native source — pairs with OPERA in the EUROPE region group;
+    # ITCOMP wins precedence over OPERA where it covers (Italy is not in
+    # the EUMETNET OPERA station list, so OPERA-over-Italy is edge-of-range
+    # data from neighbours).
+    dpc_base_url: str = "https://radar-api.protezionecivile.it"
+    dpc_enabled: bool = True
     ecmwf_s3_bucket: str = "openmeteo"
     ecmwf_s3_region: str = "us-west-2"
     ecmwf_s3_prefix: str = "data_spatial/ecmwf_ifs"
