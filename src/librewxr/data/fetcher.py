@@ -449,7 +449,7 @@ class RadarFetcher:
         # For each timestamp, fetch regions in parallel (skipping any
         # already present from a previous partial fetch).
         tasks = []
-        task_meta: list[tuple[int, RegionDef]] = []
+        task_meta: list[tuple[int, RegionDef, str]] = []
 
         for ts, source_type, source_arg in ts_and_sources:
             have = skip_regions.get(ts, set()) if skip_regions else set()
@@ -461,13 +461,13 @@ class RadarFetcher:
                     tasks.append(source.fetch_frame(region, source_arg))
                 else:
                     tasks.append(source.fetch_archive_frame(region, source_arg))
-                task_meta.append((ts, region))
+                task_meta.append((ts, region, source_type))
 
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
         # Group results by timestamp and build frames
         frames_by_ts: dict[int, dict[str, np.ndarray]] = {}
-        for (ts, region), result in zip(task_meta, results):
+        for (ts, region, source_type), result in zip(task_meta, results):
             if isinstance(result, Exception):
                 logger.warning(
                     "Failed to fetch %s for ts=%d: %s", region.name, ts, result
@@ -481,6 +481,17 @@ class RadarFetcher:
                 if fallback_result is not None:
                     result = fallback_result
                 else:
+                    # Silent-None drops on the live slot are the visible-to-
+                    # user case — they create a partial or missing region in
+                    # the most-recent frame, which produces masking artifacts
+                    # and degrades the nowcast input.  Archive misses are
+                    # normal (sources have finite history) and stay silent.
+                    if source_type == "live":
+                        logger.warning(
+                            "%s: source returned no data for live ts=%d "
+                            "(silent drop — region absent from this frame)",
+                            region.name, ts,
+                        )
                     continue
             else:
                 # CACOMP blending: MRMS+MSC blend mode only.

@@ -48,6 +48,44 @@ _FARNEBACK = dict(
     flags=0,
 )
 
+# Coverage-degradation guard: if the latest radar frame for a region has
+# lost more than this fraction of its non-zero pixels vs the previous
+# frame, skip optical-flow extrapolation for that region this cycle.
+#
+# Triggered by contributing-source dropouts that produce partial frames —
+# e.g. MSC Canada drops while MRMS holds, so CACOMP's latest frame
+# covers only ~55°N and south while the previous frame covered all of
+# Canada.  Running Farneback flow across that boundary produces wild
+# motion vectors that ``_extrapolate_forward`` then warps into vertical
+# streaks of fake precipitation.  Skipping the flow lets the renderer
+# fall back to NWP fill, which is the honest behaviour when the
+# upstream observation is incomplete.
+#
+# 0.4 = "latest has under 40% of prev's non-zero pixel count".  A 60%
+# loss is well outside normal precipitation evolution at 10-minute
+# spacing (storms don't dissipate that fast); a source dropout drops
+# the count far more dramatically (CACOMP loses ~70-90%).
+_COVERAGE_DEGRADATION_RATIO = 0.4
+
+# Don't apply the degradation guard when the previous frame had only
+# a small smattering of precipitation — natural variation can swing
+# small counts by large fractions without anything being wrong.
+_MIN_PREV_NONZERO_PX = 1000
+
+
+def _coverage_degraded(prev: np.ndarray, latest: np.ndarray) -> tuple[bool, int, int]:
+    """Detect partial-coverage degradation between two consecutive frames.
+
+    Returns ``(is_degraded, prev_nonzero, latest_nonzero)``.  Caller
+    logs the counts on degradation so the rack log shows exactly which
+    region tripped the guard and by how much.
+    """
+    prev_nz = int(np.count_nonzero(prev))
+    latest_nz = int(np.count_nonzero(latest))
+    if prev_nz < _MIN_PREV_NONZERO_PX:
+        return False, prev_nz, latest_nz
+    return latest_nz < _COVERAGE_DEGRADATION_RATIO * prev_nz, prev_nz, latest_nz
+
 
 # ---------------------------------------------------------------------------
 # NowcastStore
@@ -390,6 +428,15 @@ class NowcastGenerator:
             data0 = prev_regions.get(region_name)
             data1 = latest_regions.get(region_name)
             if data0 is None or data1 is None:
+                continue
+            degraded, prev_nz, latest_nz = _coverage_degraded(data0, data1)
+            if degraded:
+                logger.warning(
+                    "Nowcast: %s coverage degraded (%d → %d non-zero px) — "
+                    "skipping optical-flow extrapolation to avoid streak "
+                    "artifacts from partial-frame motion estimation",
+                    region_name, prev_nz, latest_nz,
+                )
                 continue
             flows[region_name] = _compute_flow(data0, data1)
 

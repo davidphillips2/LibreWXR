@@ -13,6 +13,7 @@ from librewxr.data.nowcast import (
     NowcastGenerator,
     NowcastStore,
     _compute_flow,
+    _coverage_degraded,
     _extrapolate_forward,
 )
 
@@ -279,3 +280,119 @@ class TestNowcastGeneratorSync:
         for f in frames:
             assert "A" in f.regions
             assert "B" in f.regions
+
+
+# ---------------------------------------------------------------------------
+# Coverage-degradation guard
+# ---------------------------------------------------------------------------
+
+
+class TestCoverageDegradedHelper:
+    """Direct unit tests for the partial-frame detection threshold."""
+
+    def test_no_degradation_when_counts_match(self):
+        a = _make_blob(60, 100, radius=30)
+        degraded, prev_nz, latest_nz = _coverage_degraded(a, a.copy())
+        assert degraded is False
+        assert prev_nz == latest_nz > 0
+
+    def test_no_degradation_for_small_natural_variation(self):
+        prev = _make_blob(60, 100, radius=30)
+        # Latest has the blob shifted slightly — same pixel count.
+        latest = _make_blob(60, 105, radius=30)
+        degraded, _, _ = _coverage_degraded(prev, latest)
+        assert degraded is False
+
+    def test_degraded_when_latest_loses_most_pixels(self):
+        prev = _make_blob(60, 100, radius=40)  # ~5000 px
+        # Latest has tiny remnant — well under 40% of prev.
+        latest = _make_blob(60, 100, radius=5)  # ~80 px
+        degraded, prev_nz, latest_nz = _coverage_degraded(prev, latest)
+        assert degraded is True
+        assert prev_nz > _MIN_PREV_NONZERO_PX_FOR_TEST
+        assert latest_nz < prev_nz * 0.4
+
+    def test_no_degradation_when_prev_is_tiny(self):
+        """Tiny prev shouldn't trigger the guard — natural variation
+        on small counts can swing huge percentages without anything
+        being wrong."""
+        prev = _make_blob(60, 100, radius=3)  # ~30 px, well under threshold
+        latest = np.zeros((H, W), dtype=np.uint8)
+        degraded, _, _ = _coverage_degraded(prev, latest)
+        assert degraded is False
+
+
+# Pulled from nowcast.py so tests stay in sync with the production constant.
+from librewxr.data.nowcast import _MIN_PREV_NONZERO_PX as _MIN_PREV_NONZERO_PX_FOR_TEST  # noqa: E402
+
+
+class TestNowcastGuardIntegration:
+    """End-to-end: a partial-coverage latest frame must skip extrapolation."""
+
+    def test_partial_coverage_latest_skips_extrapolation(self):
+        """Simulate the CACOMP-loses-MSC failure mode.
+
+        Prev frame: full coverage with precip across the whole region.
+        Latest frame: only the southernmost ~quarter retains data — as
+        if a contributing source dropped and we only have observations
+        south of a coverage boundary.  Without the guard, optical flow
+        across that boundary produces wild vectors that warp into
+        streaks.  With the guard, the region is skipped entirely.
+        """
+        # Prev: full coverage (analog: MRMS + MSC blend, all of Canada).
+        prev = np.full((H, W), 150, dtype=np.uint8)
+
+        # Latest: only the southernmost ~25% (analog: MRMS-only, south
+        # of MSC's contribution boundary).  Pixel-count ratio ≈ 0.25,
+        # well below the 0.4 degradation threshold.
+        latest = np.zeros((H, W), dtype=np.uint8)
+        latest[int(H * 0.75):, :] = 150
+
+        frames, flows = NowcastGenerator._generate_sync(
+            {"CACOMP": prev}, {"CACOMP": latest},
+            latest_ts=1000, n_steps=6, interval=600,
+        )
+
+        # The guard skips flow computation entirely — no flow recorded,
+        # no extrapolated CACOMP frames produced.
+        assert "CACOMP" not in flows
+        assert frames == []
+
+    def test_full_coverage_pair_passes_guard(self):
+        """A normal frame-to-frame pair should NOT trigger the guard —
+        small motion-induced count changes are well within tolerance.
+        """
+        prev = _make_blob(60, 100, radius=40)
+        latest = _make_blob(60, 110, radius=40)  # same size, shifted
+
+        frames, flows = NowcastGenerator._generate_sync(
+            {"R": prev}, {"R": latest},
+            latest_ts=1000, n_steps=3, interval=600,
+        )
+
+        assert "R" in flows
+        assert len(frames) == 3
+
+    def test_one_region_degraded_others_pass(self):
+        """The guard is per-region: a degraded region is dropped but
+        healthy peers still get their nowcasts generated."""
+        # Healthy: shifted blob.
+        good_prev = _make_blob(60, 100, radius=40)
+        good_latest = _make_blob(60, 110, radius=40)
+
+        # Degraded: most of the coverage drops out.
+        bad_prev = np.full((H, W), 150, dtype=np.uint8)
+        bad_latest = np.zeros((H, W), dtype=np.uint8)
+        bad_latest[int(H * 0.75):, :] = 150
+
+        frames, flows = NowcastGenerator._generate_sync(
+            {"GOOD": good_prev, "BAD": bad_prev},
+            {"GOOD": good_latest, "BAD": bad_latest},
+            latest_ts=1000, n_steps=2, interval=600,
+        )
+
+        assert "GOOD" in flows
+        assert "BAD" not in flows
+        for f in frames:
+            assert "GOOD" in f.regions
+            assert "BAD" not in f.regions
