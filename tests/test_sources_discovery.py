@@ -217,9 +217,10 @@ def test_radar_disabled_skips_coverage_metadata(monkeypatch):
 
     settings = MagicMock()
     settings.radar_enabled = False
-    station_map, range_overrides = collect_radar_coverage_metadata(settings)
+    station_map, range_overrides, coverage_polygons = collect_radar_coverage_metadata(settings)
     assert station_map == {}
     assert range_overrides == {}
+    assert coverage_polygons == {}
 
 
 def test_regional_nwp_disabled_keeps_only_ifs(tmp_path):

@@ -27,7 +27,7 @@ from librewxr.sources._base import RadarSourceContribution
 
 from .regions import REGIONS, REGION_GROUP
 from .source import JMAAnalysisSource, JMAFetcher
-from .stations import STATION_MAP
+from .stations import COVERAGE_POLYGONS, STATION_MAP
 
 
 # Module-level singleton fetcher.  Kept as a singleton in case a future
@@ -61,4 +61,5 @@ def radar_provider(settings) -> RadarSourceContribution | None:
         group=REGION_GROUP,
         station_map=STATION_MAP,
         range_overrides={},
+        coverage_polygons=COVERAGE_POLYGONS,
     )

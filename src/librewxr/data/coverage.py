@@ -79,11 +79,57 @@ def _build_region_mask(
     )
 
 
+def _build_region_polygon_mask(
+    region: RegionDef,
+    polygon: list[tuple[float, float]],
+) -> None:
+    """Build a coverage mask by rasterising a polygon over the region grid.
+
+    ``polygon`` is a list of ``(latitude, longitude)`` vertices in order
+    around the perimeter.  Winding direction doesn't matter — ``cv2.fillPoly``
+    rasterises the interior regardless.  Vertices are converted to mask
+    grid pixel coordinates before the fill.
+    """
+    west, east = region.west, region.east
+    south, north = region.south, region.north
+
+    dx = MASK_RESOLUTION_DEG
+    dy = MASK_RESOLUTION_DEG
+    nx = max(1, int(math.ceil((east - west) / dx)))
+    ny = max(1, int(math.ceil((north - south) / dy)))
+
+    # Convert (lat, lon) → (col, row) in mask pixel space.  cv2.fillPoly
+    # expects an int32 array shaped ``(1, N, 2)`` in (x, y) order.
+    pts = np.array([
+        [
+            [int(round((lon - west) / dx)),
+             int(round((lat - south) / dy))]
+            for lat, lon in polygon
+        ]
+    ], dtype=np.int32)
+
+    canvas = np.zeros((ny, nx), dtype=np.uint8)
+    cv2.fillPoly(canvas, pts, 255)
+    mask = canvas > 0
+
+    _COVERAGE_MASKS[region.name] = (mask, west, south, dx, dy)
+    logger.info(
+        "coverage mask %s: %dx%d @ %.2f° (polygon, %d vertices, %.1f%% covered)",
+        region.name, ny, nx, MASK_RESOLUTION_DEG, len(polygon),
+        100.0 * mask.mean(),
+    )
+
+
 def build_coverage_masks(
     station_map: dict[str, list[tuple[float, float]]],
     range_overrides: dict[str, float] | None = None,
+    coverage_polygons: dict[str, list[tuple[float, float]]] | None = None,
 ) -> None:
-    """Build coverage masks for every region in ``station_map``.
+    """Build coverage masks for every region with station data or a polygon.
+
+    Polygons take precedence over station circles when both are
+    provided for the same region — the polygon is the authoritative
+    statement of the published product extent.
 
     Args:
         station_map: Mapping of region name to its contributing radar
@@ -96,9 +142,26 @@ def build_coverage_masks(
             ``DEFAULT_RADAR_RANGE_KM``.  Used by OPERA (300 km C-band
             reach), SVCOMP (120 km product), CWA TWCOMP (450 km typhoon
             buffer), and the MET Malaysia regions.
+        coverage_polygons: Optional mapping of region name to a polygon
+            describing the published coverage extent.  Used by
+            gauge-corrected QPE composites whose product extent
+            doesn't match individual Doppler ranges — JMA HRPN's tile
+            pyramid traces a tilted polygon along the archipelago,
+            extending well past 240 km Doppler reach into the offshore
+            Pacific.  Vertices are ``(latitude, longitude)`` tuples.
     """
     range_overrides = range_overrides or {}
+    coverage_polygons = coverage_polygons or {}
+
+    for region_name, polygon in coverage_polygons.items():
+        region = REGIONS.get(region_name)
+        if region is None:
+            continue
+        _build_region_polygon_mask(region, polygon)
+
     for region_name, stations in station_map.items():
+        if region_name in coverage_polygons:
+            continue
         region = REGIONS.get(region_name)
         if region is None:
             continue

@@ -220,8 +220,12 @@ async def _render_only_lifespan(app: FastAPI):
     alerts_store = stores["alerts_store"]
 
     enabled = settings.get_enabled_regions()
-    station_map, range_overrides = collect_radar_coverage_metadata(settings)
-    build_coverage_masks(station_map, range_overrides=range_overrides)
+    station_map, range_overrides, coverage_polygons = collect_radar_coverage_metadata(settings)
+    build_coverage_masks(
+        station_map,
+        range_overrides=range_overrides,
+        coverage_polygons=coverage_polygons,
+    )
     build_feather_masks()
 
     # Chain order mirrors ``collect_nwp_contributions`` (sorted by
@@ -378,8 +382,12 @@ async def lifespan(app: FastAPI):
     # range override; the registry walk merges them based on the active
     # settings (e.g. NA source = MRMS pulls in NEXRAD + Canadian; NA
     # source = IEM pulls NEXRAD only).
-    station_map, range_overrides = collect_radar_coverage_metadata(settings)
-    build_coverage_masks(station_map, range_overrides=range_overrides)
+    station_map, range_overrides, coverage_polygons = collect_radar_coverage_metadata(settings)
+    build_coverage_masks(
+        station_map,
+        range_overrides=range_overrides,
+        coverage_polygons=coverage_polygons,
+    )
     build_feather_masks()
 
     # Nowcast store and generator

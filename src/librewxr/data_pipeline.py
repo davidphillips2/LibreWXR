@@ -140,8 +140,12 @@ async def run_pipeline() -> None:
             ", ".join(c.name for c in satellite_contribs),
         )
 
-    station_map, range_overrides = collect_radar_coverage_metadata(settings)
-    build_coverage_masks(station_map, range_overrides=range_overrides)
+    station_map, range_overrides, coverage_polygons = collect_radar_coverage_metadata(settings)
+    build_coverage_masks(
+        station_map,
+        range_overrides=range_overrides,
+        coverage_polygons=coverage_polygons,
+    )
     build_feather_masks()
 
     nowcast_store = None

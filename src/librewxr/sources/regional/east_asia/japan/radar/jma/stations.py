@@ -55,11 +55,44 @@ STATIONS: list[tuple[float, float]] = [
 ]
 
 
-# Empty intentionally — see module docstring above.  The empty dict
-# leaves JPCOMP out of ``_COVERAGE_MASKS`` so ``sample_coverage``
-# returns the full-region-bbox fallback.
+# Empty intentionally — coverage comes from the polygon below, not from
+# station circles.  See module docstring.
 STATION_MAP: dict[str, list[tuple[float, float]]] = {}
 
 # Empty intentionally — no per-station range overrides apply when no
-# station mask is registered in the first place.
+# station-circle mask is built in the first place.
 RANGE_OVERRIDES: dict[str, dict[tuple[float, float], float]] = {}
+
+
+# JPCOMP coverage polygon — vertices in (latitude, longitude) order,
+# clockwise around the perimeter starting from the northern edge.
+# Traced from JMA's own HRPN viewer at the published tile-pyramid extent
+# (the stair-stepped polygon visible at z=8 over Hokkaido → Sakishima).
+# Extends substantially further east into the Pacific than west into
+# the Sea of Japan, matching the gauge-corrected fusion's offshore
+# reach.  Stays inside the JPCOMP region rectangle (122-149°E × 22-46°N).
+JPCOMP_COVERAGE_POLYGON: list[tuple[float, float]] = [
+    (46.0, 141.5),   # N of Hokkaido NW coast
+    (46.0, 145.5),   # N of Hokkaido NE coast
+    (45.5, 148.5),   # NE corner offshore E of Hokkaido
+    (40.0, 148.0),   # E of N Honshu (Tohoku)
+    (35.0, 146.5),   # E of central Honshu
+    (30.0, 144.0),   # E of S Honshu
+    (27.0, 140.0),   # SE corner extending into Pacific
+    (25.5, 134.0),   # E of Okinawa main island
+    (24.5, 130.0),   # E of Sakishima Islands
+    (24.0, 126.0),   # S of Sakishima
+    (23.5, 122.5),   # SW corner near Yonaguni
+    (25.5, 122.0),   # W of Yonaguni
+    (28.0, 124.0),   # W of Sakishima
+    (31.5, 127.0),   # W of S Kyushu
+    (35.0, 130.0),   # W of N Kyushu
+    (38.0, 132.5),   # W of N Honshu (Sea of Japan)
+    (42.0, 135.5),   # W of Hokkaido (Sea of Japan)
+    (45.0, 138.5),   # NW of Hokkaido (Sea of Japan)
+]
+
+
+COVERAGE_POLYGONS: dict[str, list[tuple[float, float]]] = {
+    "JPCOMP": JPCOMP_COVERAGE_POLYGON,
+}

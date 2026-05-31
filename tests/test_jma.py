@@ -238,11 +238,12 @@ class TestProviderShape:
         assert c.group == "JAPAN"
         assert len(c.regions) == 1
         assert c.regions[0].name == "JPCOMP"
-        # JPCOMP is intentionally absent from station_map — JMA HRPN is a
-        # gauge-corrected QPE composite whose product extent goes well
-        # past 240 km Doppler reach, so coverage is treated as the full
-        # JPCOMP rectangle.  See stations.py module docstring.
+        # JPCOMP is intentionally absent from station_map — coverage
+        # comes from a polygon that traces the published HRPN tile-
+        # pyramid extent.  See stations.py module docstring.
         assert c.station_map == {}
+        assert "JPCOMP" in c.coverage_polygons
+        assert len(c.coverage_polygons["JPCOMP"]) >= 8  # tilted polygon, not bbox
 
     def test_radar_provider_returns_none_when_disabled(self):
         class _S:
@@ -250,72 +251,103 @@ class TestProviderShape:
         assert radar_provider(_S()) is None
 
 
-class TestJPCOMPCoverageIsFullRegion:
-    """Regression: JPCOMP must report full-rectangle coverage, not station circles.
+class TestJPCOMPCoveragePolygon:
+    """Regression: JPCOMP coverage follows the real HRPN polygon, not
+    the full JPCOMP rectangle and not a 240 km station-circle union.
 
-    Bug 2026-05-30: with a 240 km station-circle mask, large offshore
-    swaths within the JMA HRPN tile pyramid (where the gauge-corrected
-    QPE composite actually has data) fell outside the union mask, so
-    the renderer's NWP-fill path painted JMA MSM precipitation on top
-    of valid radar pixels.  The fix is to leave JPCOMP out of the
-    station map so ``data/coverage.py`` returns the full-bbox fallback.
+    Bug history:
+      - 240 km station-circle mask was way too small — large offshore
+        swaths where the gauge-corrected QPE composite has data fell
+        outside the union, so MSM bleed-through painted model precip
+        over valid radar.
+      - Full-bbox fallback was way too large — claimed coverage over
+        Korea, the Sea of Japan, and the Yellow Sea where HRPN has no
+        data, blocking MSM from contributing anywhere in MSM's domain
+        that overlaps the JPCOMP rectangle.
+      - The right answer is a polygon traced from JMA's published HRPN
+        viewer extent — a tilted parallelogram along the archipelago.
     """
 
+    @pytest.fixture(autouse=True)
+    def build_jpcomp_mask(self):
+        """Build the JPCOMP polygon mask for tests in this class."""
+        from librewxr.data import coverage as cov
+        from librewxr.sources.regional.east_asia.japan.radar.jma.stations import (
+            COVERAGE_POLYGONS,
+        )
+        cov.build_coverage_masks({}, coverage_polygons=COVERAGE_POLYGONS)
+        yield
+        cov._COVERAGE_MASKS.pop("JPCOMP", None)
+
     def test_jpcomp_not_in_station_map(self):
-        """Provider must NOT register a station mask for JPCOMP."""
+        """Provider must NOT register a station mask for JPCOMP — the
+        polygon is the authoritative coverage statement.
+        """
         class _S:
             jma_enabled = True
             jma_base_url = "https://example.invalid/nowc"
             jma_zoom = 8
         c = radar_provider(_S())
         assert "JPCOMP" not in c.station_map
+        assert "JPCOMP" in c.coverage_polygons
 
-    def test_sample_coverage_covers_offshore_inside_bbox(self):
-        """``sample_coverage`` must return True for offshore points well
-        beyond Doppler reach but still inside the JPCOMP rectangle.
-        """
+    def test_covers_offshore_pacific_east_of_japan(self):
+        """Deep Pacific offshore E of Japan is genuine HRPN territory."""
         from librewxr.data import coverage as cov
-
-        # Point at ~33°N 145°E — deep Pacific east of Japan, far past any
-        # Doppler reach but well inside the JPCOMP rect (122-149°E).
-        # HRPN's actual tile pyramid covers this; the renderer must
-        # honour that and not let NWP bleed through here.
+        # Point at ~33°N 145°E — well east of Tokyo, deep Pacific, far past
+        # any Doppler reach.  HRPN's tile pyramid covers this and the
+        # renderer must trust the radar here, not bleed MSM through.
         result = cov.sample_coverage(
             "JPCOMP",
             np.array([33.0]), np.array([145.0]),
         )
         assert bool(result[0]) is True
 
-    def test_sample_coverage_excludes_outside_bbox(self):
-        """``sample_coverage`` must still bound the full-region fallback
-        to the JPCOMP rectangle — a tile straddling the southern edge
-        must hand off cleanly to the NWP chain south of 22°N.
-        """
+    def test_covers_japan_landmass(self):
+        """Tokyo proper must be covered (sanity check)."""
         from librewxr.data import coverage as cov
+        result = cov.sample_coverage(
+            "JPCOMP",
+            np.array([35.68]), np.array([139.69]),
+        )
+        assert bool(result[0]) is True
 
-        # 20°N 130°E — south of JPCOMP's 22°N southern edge.
+    def test_covers_ryukyu_chain(self):
+        """Yonaguni / SW Ryukyu must be covered (southernmost JMA radar)."""
+        from librewxr.data import coverage as cov
+        result = cov.sample_coverage(
+            "JPCOMP",
+            np.array([24.45]), np.array([122.95]),
+        )
+        assert bool(result[0]) is True
+
+    def test_excludes_korea_landmass(self):
+        """Seoul must NOT be reported as covered — Korea is outside HRPN."""
+        from librewxr.data import coverage as cov
+        result = cov.sample_coverage(
+            "JPCOMP",
+            np.array([37.57]), np.array([126.98]),
+        )
+        assert bool(result[0]) is False
+
+    def test_excludes_yellow_sea(self):
+        """The Yellow Sea between Korea and China must NOT be covered."""
+        from librewxr.data import coverage as cov
+        result = cov.sample_coverage(
+            "JPCOMP",
+            np.array([35.0]), np.array([124.0]),
+        )
+        assert bool(result[0]) is False
+
+    def test_excludes_below_jpcomp_southern_bbox(self):
+        """A tile straddling the south edge must hand off to NWP outside."""
+        from librewxr.data import coverage as cov
+        # 20°N is south of JPCOMP's 22°N bbox; never covered.
         result = cov.sample_coverage(
             "JPCOMP",
             np.array([20.0]), np.array([130.0]),
         )
         assert bool(result[0]) is False
-
-    def test_sample_feather_matches_coverage(self):
-        """``sample_feather`` for the no-mask region case must match the
-        coverage bbox — 1.0 inside, 0.0 outside, no soft transition.
-        """
-        from librewxr.data import coverage as cov
-
-        f_in = cov.sample_feather(
-            "JPCOMP",
-            np.array([33.0]), np.array([145.0]),
-        )
-        f_out = cov.sample_feather(
-            "JPCOMP",
-            np.array([20.0]), np.array([130.0]),
-        )
-        assert f_in[0] == pytest.approx(1.0)
-        assert f_out[0] == pytest.approx(0.0)
 
 
 class TestSourceClasses:

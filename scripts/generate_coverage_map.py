@@ -113,6 +113,7 @@ MMD_PENINSULAR_STATIONS = _mmd.PENINSULAR_STATIONS
 MMD_RANGES = _mmd.RANGE_OVERRIDES
 JMA_STATIONS = _jma.STATIONS
 JMA_RANGES = _jma.RANGE_OVERRIDES
+JMA_COVERAGE_POLYGONS = _jma.COVERAGE_POLYGONS
 
 # Combined per-region range map for the map renderer.  Mirrors what
 # ``data.coverage`` builds at runtime — provider-supplied range overrides
@@ -355,16 +356,21 @@ def build_radar_sources() -> list[Source]:
 
     # JMA HRPN composite — gauge-corrected QPE fusing 20 C-band Doppler
     # radars, the XRAIN X-band network, and the AMeDAS rain-gauge field
-    # into one published product whose tile pyramid extends deep into
-    # the offshore Pacific.  Renders as the full JPCOMP rectangle to
-    # match the runtime coverage contract (see
-    # ``data/coverage.py:sample_coverage`` — no station map → bbox-
-    # bounded full coverage).  Union of 240 km Doppler circles would
-    # under-represent the real footprint, same way it under-represented
-    # it at runtime before the 2026-05-30 fix.
+    # into one published product whose tile pyramid traces a tilted
+    # polygon along the archipelago.  Renders as the polygon JMA itself
+    # publishes (see ``stations.py:JPCOMP_COVERAGE_POLYGON``) — extends
+    # well past 240 km Doppler reach into the offshore Pacific but does
+    # NOT claim Korea, the Yellow Sea, or most of the Sea of Japan
+    # where MSM is the regional NWP layer.
+    jma_polygon = JMA_COVERAGE_POLYGONS["JPCOMP"]
+    # Polygon is stored as (lat, lon); flip to (lon, lat) and close
+    # the ring for renderer + shapely consumers.
+    jma_poly_lonlat = np.array(
+        [(lon, lat) for lat, lon in jma_polygon]
+        + [(jma_polygon[0][1], jma_polygon[0][0])]
+    )
     radar.append(Source(
-        "JMA HRPN (Japan)", "#bcbd22",
-        latlon_box(122.0, 149.0, 22.0, 46.0),
+        "JMA HRPN (Japan)", "#bcbd22", jma_poly_lonlat,
     ))
 
     # MET Malaysia — 12-radar S-band network split across Peninsular

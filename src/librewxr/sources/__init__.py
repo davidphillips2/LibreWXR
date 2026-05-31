@@ -238,13 +238,15 @@ def collect_radar_coverage_metadata(
 ) -> tuple[
     dict[str, list[tuple[float, float]]],
     dict[str, float],
+    dict[str, list[tuple[float, float]]],
 ]:
-    """Walk active radar providers; return merged station + range maps.
+    """Walk active radar providers; return merged station + range + polygon maps.
 
-    Returns ``(station_map, range_overrides)`` aggregated across every
-    provider that didn't return ``None`` for the given ``settings``.
-    Used by ``data.coverage.build_coverage_masks`` to size station-circle
-    masks directly from per-source data, with no central station table.
+    Returns ``(station_map, range_overrides, coverage_polygons)``
+    aggregated across every provider that didn't return ``None`` for
+    the given ``settings``.  Used by ``data.coverage.build_coverage_masks``
+    to size the coverage masks directly from per-source data, with no
+    central station table.
 
     The walk respects the same provider gating as the fetcher (e.g.
     MRMS vs. IEM via ``na_source``), so the coverage masks always reflect
@@ -255,9 +257,12 @@ def collect_radar_coverage_metadata(
     """
     station_map: dict[str, list[tuple[float, float]]] = {}
     range_overrides: dict[str, float] = {}
+    coverage_polygons: dict[str, list[tuple[float, float]]] = {}
     for contribution in collect_radar_contributions(settings):
         for region_name, stations in contribution.station_map.items():
             station_map[region_name] = list(stations)
         for region_name, range_km in contribution.range_overrides.items():
             range_overrides[region_name] = range_km
-    return station_map, range_overrides
+        for region_name, polygon in contribution.coverage_polygons.items():
+            coverage_polygons[region_name] = list(polygon)
+    return station_map, range_overrides, coverage_polygons

@@ -120,10 +120,20 @@ class RadarSourceContribution:
     instance serves both MYPENINSULAR and MYEAST from one HTTP fetch).
 
     ``station_map`` is keyed by region name and feeds the coverage-mask
-    builder in ``data/coverage.py``.  Regions without a station list get
-    no mask (full-region coverage is assumed).  ``range_overrides``
+    builder in ``data/coverage.py``.  Regions without a station list and
+    without a coverage polygon get no explicit mask (full-region bbox
+    coverage is assumed by ``sample_coverage``).  ``range_overrides``
     likewise feeds the mask builder — any region missing here uses the
     240 km default Doppler reach.
+
+    ``coverage_polygons`` is the alternative for gauge-corrected QPE
+    composites whose published extent doesn't match individual Doppler
+    ranges (JMA HRPN's tile pyramid traces a tilted polygon along the
+    archipelago; OPERA, MRMS would qualify too).  When a region appears
+    here, its mask is built from the polygon and the station-circle
+    path is skipped.  Vertices are (latitude, longitude) tuples in
+    polygon order — winding direction doesn't matter (the fill is
+    rasterised either way).
     """
 
     regions: list[RegionDef]
@@ -132,6 +142,9 @@ class RadarSourceContribution:
     preempts: tuple[str, ...] = ()
     station_map: dict[str, list[tuple[float, float]]] = field(default_factory=dict)
     range_overrides: dict[str, float] = field(default_factory=dict)
+    coverage_polygons: dict[str, list[tuple[float, float]]] = field(
+        default_factory=dict,
+    )
 
 
 @dataclass
