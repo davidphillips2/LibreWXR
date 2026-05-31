@@ -111,13 +111,25 @@ def sample_coverage(
 ) -> np.ndarray:
     """Return a boolean array: True where the point is within radar range.
 
-    ``lat_grid`` and ``lon_grid`` have matching shape. If no mask exists
-    for the region (e.g. GERMANY, whose composite has a proper footprint),
-    returns an all-True array — meaning "assume the whole region is covered".
+    ``lat_grid`` and ``lon_grid`` have matching shape.  If no station
+    mask exists for the region — the convention used by gauge-corrected
+    QPE composites whose product extent is defined upstream (JMA HRPN,
+    MRMS-style fusions) rather than by individual Doppler ranges — the
+    region's full bbox is treated as covered.  Still bbox-bounded so a
+    tile straddling the region edge correctly hands off to the NWP
+    chain outside.
     """
     entry = _COVERAGE_MASKS.get(region_name)
     if entry is None:
-        return np.ones(lat_grid.shape, dtype=bool)
+        region = REGIONS.get(region_name)
+        if region is None:
+            return np.ones(lat_grid.shape, dtype=bool)
+        return (
+            (lon_grid >= region.west)
+            & (lon_grid <= region.east)
+            & (lat_grid >= region.south)
+            & (lat_grid <= region.north)
+        )
 
     mask, west, south, dx, dy = entry
     ny, nx = mask.shape
@@ -174,11 +186,24 @@ def sample_feather(
     0.0 = at the coverage boundary or outside,
     1.0 = well inside coverage (≥ ``FEATHER_DISTANCE_PX`` mask pixels from edge).
 
-    If no feather mask exists for the region, returns all-ones (no feathering).
+    For regions with no feather mask — gauge-corrected QPE composites
+    that skip the station-circle mask in the first place (see
+    ``sample_coverage``) — returns 1.0 inside the region's bbox and 0.0
+    outside.  No soft transition; the radar simply dominates inside the
+    region and hands off to NWP at the edge.
     """
     entry = _FEATHER_MASKS.get(region_name)
     if entry is None:
-        return np.ones(lat_grid.shape, dtype=np.float32)
+        region = REGIONS.get(region_name)
+        if region is None:
+            return np.ones(lat_grid.shape, dtype=np.float32)
+        inside = (
+            (lon_grid >= region.west)
+            & (lon_grid <= region.east)
+            & (lat_grid >= region.south)
+            & (lat_grid <= region.north)
+        )
+        return inside.astype(np.float32)
 
     feather, west, south, dx, dy = entry
     ny, nx = feather.shape

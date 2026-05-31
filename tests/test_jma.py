@@ -238,12 +238,84 @@ class TestProviderShape:
         assert c.group == "JAPAN"
         assert len(c.regions) == 1
         assert c.regions[0].name == "JPCOMP"
-        assert "JPCOMP" in c.station_map
+        # JPCOMP is intentionally absent from station_map — JMA HRPN is a
+        # gauge-corrected QPE composite whose product extent goes well
+        # past 240 km Doppler reach, so coverage is treated as the full
+        # JPCOMP rectangle.  See stations.py module docstring.
+        assert c.station_map == {}
 
     def test_radar_provider_returns_none_when_disabled(self):
         class _S:
             jma_enabled = False
         assert radar_provider(_S()) is None
+
+
+class TestJPCOMPCoverageIsFullRegion:
+    """Regression: JPCOMP must report full-rectangle coverage, not station circles.
+
+    Bug 2026-05-30: with a 240 km station-circle mask, large offshore
+    swaths within the JMA HRPN tile pyramid (where the gauge-corrected
+    QPE composite actually has data) fell outside the union mask, so
+    the renderer's NWP-fill path painted JMA MSM precipitation on top
+    of valid radar pixels.  The fix is to leave JPCOMP out of the
+    station map so ``data/coverage.py`` returns the full-bbox fallback.
+    """
+
+    def test_jpcomp_not_in_station_map(self):
+        """Provider must NOT register a station mask for JPCOMP."""
+        class _S:
+            jma_enabled = True
+            jma_base_url = "https://example.invalid/nowc"
+            jma_zoom = 8
+        c = radar_provider(_S())
+        assert "JPCOMP" not in c.station_map
+
+    def test_sample_coverage_covers_offshore_inside_bbox(self):
+        """``sample_coverage`` must return True for offshore points well
+        beyond Doppler reach but still inside the JPCOMP rectangle.
+        """
+        from librewxr.data import coverage as cov
+
+        # Point at ~33°N 145°E — deep Pacific east of Japan, far past any
+        # Doppler reach but well inside the JPCOMP rect (122-149°E).
+        # HRPN's actual tile pyramid covers this; the renderer must
+        # honour that and not let NWP bleed through here.
+        result = cov.sample_coverage(
+            "JPCOMP",
+            np.array([33.0]), np.array([145.0]),
+        )
+        assert bool(result[0]) is True
+
+    def test_sample_coverage_excludes_outside_bbox(self):
+        """``sample_coverage`` must still bound the full-region fallback
+        to the JPCOMP rectangle — a tile straddling the southern edge
+        must hand off cleanly to the NWP chain south of 22°N.
+        """
+        from librewxr.data import coverage as cov
+
+        # 20°N 130°E — south of JPCOMP's 22°N southern edge.
+        result = cov.sample_coverage(
+            "JPCOMP",
+            np.array([20.0]), np.array([130.0]),
+        )
+        assert bool(result[0]) is False
+
+    def test_sample_feather_matches_coverage(self):
+        """``sample_feather`` for the no-mask region case must match the
+        coverage bbox — 1.0 inside, 0.0 outside, no soft transition.
+        """
+        from librewxr.data import coverage as cov
+
+        f_in = cov.sample_feather(
+            "JPCOMP",
+            np.array([33.0]), np.array([145.0]),
+        )
+        f_out = cov.sample_feather(
+            "JPCOMP",
+            np.array([20.0]), np.array([130.0]),
+        )
+        assert f_in[0] == pytest.approx(1.0)
+        assert f_out[0] == pytest.approx(0.0)
 
 
 class TestSourceClasses:
